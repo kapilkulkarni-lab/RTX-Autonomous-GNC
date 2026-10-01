@@ -1,0 +1,7 @@
+# GNC venv packages. The venv also sees ROS 2's system packages (rclpy, px4_msgs).
+numpy<2      # ROS 2 Jazzy's compiled modules are built against numpy 1.x
+scipy
+matplotlib
+networkx     # graph search (A*, PRM roadmaps)
+shapely      # 2-D geometry: obstacle footprints, keep-out zones, field quadrants
+pyyaml

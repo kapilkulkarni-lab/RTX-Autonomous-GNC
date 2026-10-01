@@ -1,0 +1,17 @@
+# generated worlds (start_sim.sh regenerates them)
+worlds/*.sdf
+worlds/*.json
+worlds/*.png
+# python / colcon
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+install/
+log/
+__pycache__/
+*.pyc
+*.bag
+*.db3
+*.ulg
+.vscode/
