@@ -3,9 +3,15 @@
 Waypoints are straight lines at a fixed altitude. This node is the *execution* layer:
 the path planner's job is to replace `self.waypoints` with a real, obstacle-aware path.
 
+Guidance between waypoints (parameter `guidance`):
+    cubic   (default) time-defined smoothstep cubic per segment, see trajectory.py.
+            Publishes position + velocity + acceleration feedforward and yaw/yaw rate.
+    carrot  the original moving setpoint at constant speed, position only.
+
 Run (sim + agent already up, drone landed and disarmed):
     ros2 run gnc_offboard mission_demo
-    ros2 run gnc_offboard mission_demo --ros-args -p altitude:=2.0 -p speed:=0.8
+    ros2 run gnc_offboard mission_demo --ros-args -p speed:=0.8 -p max_accel:=0.4
+    ros2 run gnc_offboard mission_demo --ros-args -p guidance:=carrot
     ros2 run gnc_offboard mission_demo --ros-args -p waypoints:="[0.0, 0.0, 3.0, -2.0]"
 """
 import json
@@ -24,6 +30,7 @@ from px4_msgs.msg import (OffboardControlMode, TrajectorySetpoint, VehicleComman
                           VehicleLocalPosition, VehicleStatus)
 
 from gnc_offboard.frames import FieldFrame
+from gnc_offboard.trajectory import CubicSegment
 
 # PX4's uXRCE-DDS topics require this QoS, or subscriptions silently receive nothing.
 PX4_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -41,14 +48,20 @@ class MissionDemo(Node):
         default_manifest = str(Path(sim_dir) / 'worlds/avc_field_manifest.json')
         self.declare_parameter('manifest', default_manifest)
         self.declare_parameter('altitude', 1.5)          # m above spawn
-        self.declare_parameter('speed', 1.0)             # m/s, carrot speed (indoors!)
+        self.declare_parameter('speed', 1.0)             # m/s: carrot speed, or cubic peak speed
+        self.declare_parameter('max_accel', 0.5)         # m/s^2, cubic peak acceleration
+        self.declare_parameter('guidance', 'cubic')      # 'cubic' or 'carrot'
         self.declare_parameter('acceptance_radius', 0.25)
         self.declare_parameter('hover_time', 3.0)        # s at each waypoint
         self.declare_parameter('waypoints', Parameter.Type.DOUBLE_ARRAY)  # field x,y pairs
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
-        self.alt, self.speed = p('altitude'), p('speed')
+        self.alt, self.speed, self.max_accel = p('altitude'), p('speed'), p('max_accel')
         self.acc_r, self.hover_time = p('acceptance_radius'), p('hover_time')
+        self.guidance = p('guidance')
+        if self.guidance not in ('cubic', 'carrot'):
+            raise ValueError("guidance must be 'cubic' or 'carrot'")
+        self.get_logger().info(f'Guidance: {self.guidance}')
 
         manifest = json.loads(Path(p('manifest')).read_text())
         self.frame = FieldFrame.from_manifest(manifest)
@@ -77,7 +90,8 @@ class MissionDemo(Node):
         self.state = 'WAIT_POS'
         self.stream_count = 0
         self.last_cmd_time = -1.0
-        self.carrot = None       # moving setpoint [n, e, d]
+        self.carrot = None       # current position setpoint [n, e, d] (either guidance mode)
+        self.segment = None      # active CubicSegment (cubic guidance only)
         self.wp_idx = 0
         self.hover_start = None
         self.yaw = float('nan')
@@ -136,16 +150,18 @@ class MissionDemo(Node):
     def publish_mode(self):
         m = OffboardControlMode()
         m.timestamp = self.stamp()
-        m.position = True
+        m.position = True   # position is primary; velocity/accel below are feedforward
         self.mode_pub.publish(m)
 
-    def publish_setpoint(self, ned, yaw):
+    def publish_setpoint(self, ned, yaw, vel=None, acc=None, yawspeed=float('nan')):
+        """NaN fields tell PX4 'not given'. With cubic guidance vel/acc are feedforward."""
         m = TrajectorySetpoint()
         m.timestamp = self.stamp()
         m.position = [float(v) for v in ned]
-        m.velocity = NAN3
-        m.acceleration = NAN3
+        m.velocity = [float(v) for v in vel] if vel is not None else NAN3
+        m.acceleration = [float(v) for v in acc] if acc is not None else NAN3
         m.yaw = float(yaw)
+        m.yawspeed = float(yawspeed)
         self.sp_pub.publish(m)
 
     def vehicle_ned(self):
@@ -157,8 +173,9 @@ class MissionDemo(Node):
                 and s.arming_state == VehicleStatus.ARMING_STATE_ARMED
                 and s.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD)
 
+    # ---------------------------------------------------------------- guidance
     def advance_carrot(self, target):
-        """Move the setpoint toward `target` at `speed`, so PX4 never sees a big jump."""
+        """Carrot guidance: move the setpoint toward `target` at `speed`, position only."""
         step = self.speed / RATE_HZ
         d = [t - c for t, c in zip(target, self.carrot)]
         dist = math.sqrt(sum(v * v for v in d))
@@ -168,6 +185,24 @@ class MissionDemo(Node):
             self.carrot = [c + v * step / dist for c, v in zip(self.carrot, d)]
         if math.hypot(d[0], d[1]) > 0.3:  # face direction of horizontal travel
             self.yaw = math.atan2(d[1], d[0])
+        self.publish_setpoint(self.carrot, self.yaw)
+
+    def advance_cubic(self, target):
+        """Cubic guidance: sample the time-defined segment and publish the full state."""
+        now = self.now_s()
+        if self.segment is None:
+            # New segment starts from the last setpoint (where the vehicle is holding).
+            dn, de = target[0] - self.carrot[0], target[1] - self.carrot[1]
+            yaw1 = math.atan2(de, dn) if math.hypot(dn, de) > 0.3 else self.yaw
+            self.segment = CubicSegment(self.carrot, target, now, self.speed,
+                                        self.max_accel, yaw0=self.yaw, yaw1=yaw1)
+            self.get_logger().info(
+                f'Segment {self.wp_idx}: {self.segment.length:.2f} m in {self.segment.T:.1f} s')
+        pos, vel, acc, yaw, yawspeed = self.segment.sample(now)
+        if self.segment.done(now):
+            pos = list(target)   # land exactly on the waypoint, no float drift
+        self.carrot, self.yaw = pos, yaw
+        self.publish_setpoint(pos, yaw, vel, acc, yawspeed)
 
     # ---------------------------------------------------------------- state machine
     def tick(self):
@@ -218,8 +253,10 @@ class MissionDemo(Node):
             return
 
         target = self.waypoints[self.wp_idx]
-        self.advance_carrot(target)
-        self.publish_setpoint(self.carrot, self.yaw)
+        if self.guidance == 'cubic':
+            self.advance_cubic(target)
+        else:
+            self.advance_carrot(target)
 
         err = math.dist(self.vehicle_ned(), target)
         if self.carrot == list(target) and err < self.acc_r:
@@ -230,6 +267,7 @@ class MissionDemo(Node):
                     f'Reached waypoint {self.wp_idx} (field {x:.2f}, {y:.2f}, alt {z:.2f})')
             elif self.now_s() - self.hover_start >= self.hover_time:
                 self.hover_start = None
+                self.segment = None   # next waypoint gets a fresh cubic
                 self.wp_idx += 1
                 if self.wp_idx >= len(self.waypoints):
                     self.get_logger().info('Path complete. Landing.')

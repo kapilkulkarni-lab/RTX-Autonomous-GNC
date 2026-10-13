@@ -11,7 +11,7 @@ Simulation and offboard-control stack for the GNC team (path planning and drone 
 | `doctor.sh` | Health check. Run it while the sim is up and it reports what's working and what isn't: builds, processes, agent count, and whether ROS 2 can see PX4's topics. |
 | `gnc_env.sh` | Loads ROS 2, the workspace and the venv in the right order. You normally just type `gnc`. |
 | `generate_avc_world.py` | Builds a random AVC field (15×15 yd, start zone, dice, obstacles 5 ft apart) plus a JSON manifest of ground truth. |
-| `gnc_offboard/` | ROS 2 package: `frames.py` (field ENU ↔ PX4 NED, tested) and `mission_demo` (take off → target die → start zone → land). |
+| `gnc_offboard/` | ROS 2 package: `frames.py` (field ENU ↔ PX4 NED, tested), `trajectory.py` (time-defined smoothstep cubic guidance, GNC Notes 5.5, tested) and `mission_demo` (take off → target die → start zone → land). Guidance defaults to `cubic`; `-p guidance:=carrot` gives the old constant-speed setpoint. See `docs/cubic_vs_carrot.png`. |
 | `requirements-gnc.txt` | Python packages for the venv (numpy pinned below 2 for ROS 2 Jazzy). |
 
 ## Install (once per computer)
