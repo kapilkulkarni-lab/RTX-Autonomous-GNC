@@ -22,14 +22,21 @@ ARMED = 2             # VehicleStatus.ARMING_STATE_ARMED
 
 
 def log_dir():
+    """Where SITL logs are searched for. PX4 versions differ on the exact subfolder
+    (rootfs/log, rootfs/<instance>/log, ...), so everything under here is searched."""
     px4 = os.environ.get('PX4_DIR', str(Path.home() / 'dev/PX4-Autopilot'))
-    return Path(px4) / 'build' / 'px4_sitl_default' / 'rootfs' / 'log'
+    return Path(px4) / 'build' / 'px4_sitl_default'
 
 
 def latest_ulog(directory=None):
-    logs = sorted(Path(directory or log_dir()).rglob('*.ulg'), key=lambda p: p.stat().st_mtime)
+    root = Path(directory or log_dir())
+    logs = sorted(root.rglob('*.ulg'), key=lambda p: p.stat().st_mtime) if root.exists() else []
     if not logs:
-        raise FileNotFoundError(f'no .ulg files under {directory or log_dir()}')
+        raise FileNotFoundError(
+            f'no flight logs (.ulg) found under {root}\n'
+            'PX4 only writes a log while the drone is armed, so fly once first (e.g. '
+            'ros2 run gnc_offboard mission_demo until "Landed and disarmed"), then rerun.\n'
+            'A rebuild or `make distclean` also deletes old logs. Or pass a .ulg path directly.')
     return logs[-1]
 
 

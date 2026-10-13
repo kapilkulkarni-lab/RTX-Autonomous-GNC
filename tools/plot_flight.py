@@ -141,7 +141,14 @@ def main():
         matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    paths = [Path(p) for p in args.logs] or [latest_ulog()]
+    try:
+        paths = [Path(p) for p in args.logs] or [latest_ulog()]
+    except FileNotFoundError as e:
+        raise SystemExit(str(e))
+    for p in paths:
+        if not p.exists():
+            raise SystemExit(f'no such file: {p}')
+    print(f'log: {paths[0]}' if len(paths) == 1 else f'logs: {", ".join(map(str, paths))}')
     if len(paths) > MAX_LOGS:
         raise SystemExit(f'compare at most {MAX_LOGS} logs at once')
     labels = args.labels.split(',') if args.labels else [p.stem for p in paths]
