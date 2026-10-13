@@ -340,9 +340,16 @@ def main() -> int:
         yaw = rng.uniform(-math.pi, math.pi)
         name = f"obs_{i:02d}_{kind}"
         models.append(obstacle_model(name, kind, x, y, yaw))
+        spec = OBSTACLE_TYPES[kind]
+        if spec["shape"] == "box":       # footprint seen from above, in the obstacle's frame
+            shape = {"shape": "box", "w": spec["size"][0], "d": spec["size"][1]}
+        elif spec["shape"] == "cone":    # square base
+            shape = {"shape": "box", "w": spec["base"], "d": spec["base"]}
+        else:
+            shape = {"shape": "circle", "r": spec["radius"]}
         obs_manifest.append({"name": name, "kind": kind, "x": round(x, 4), "y": round(y, 4),
                              "yaw": round(yaw, 4), "footprint_radius": round(r, 4),
-                             "height": height_of(OBSTACLE_TYPES[kind])})
+                             "footprint": shape, "height": height_of(spec)})
 
     dice_manifest = []
     for color, x, y, _ in dice:

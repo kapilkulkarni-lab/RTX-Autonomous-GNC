@@ -12,6 +12,8 @@ Simulation and offboard-control stack for the GNC team (path planning and drone 
 | `gnc_env.sh` | Loads ROS 2, the workspace and the venv in the right order. You normally just type `gnc`. |
 | `generate_avc_world.py` | Builds a random AVC field (15×15 yd, start zone, dice, obstacles 5 ft apart) plus a JSON manifest of ground truth. |
 | `gnc_offboard/` | ROS 2 package: `frames.py` (field ENU ↔ PX4 NED, tested), `trajectory.py` (time-defined smoothstep cubic guidance, GNC Notes 5.5, tested) and `mission_demo` (take off → target die → start zone → land). Guidance defaults to `cubic`; `-p guidance:=carrot` gives the old constant-speed setpoint. See `docs/cubic_vs_carrot.png`. |
+| `tools/plot_field.py` | Draws the field from the manifest; with `--waypoints` or `--path`, checks a path against inflated obstacles and marks violations. |
+| `tools/plot_flight.py` | Plots a PX4 flight log (newest by default) on the field: path, altitude, speed, tracking error. Compare up to 3 logs. |
 | `requirements-gnc.txt` | Python packages for the venv (numpy pinned below 2 for ROS 2 Jazzy). |
 
 ## Install (once per computer)
@@ -73,6 +75,25 @@ Quick manual test in the PX4 pane: `commander takeoff`, then `commander land`.
 ```bash
 deactivate 2>/dev/null; cd ~/dev/ros2_ws && colcon build --packages-select gnc_offboard; gnc
 ```
+
+## Plotting
+
+Run these in the dev pane (`gnc` active). PNGs go to `plots/` (git-ignored); add `--show` to open a window.
+
+```bash
+cd ~/dev/avc-gnc
+tools/plot_field.py                                    # the current world
+tools/plot_field.py --waypoints "-6.1,6.1, -3,2.5"     # check a path (field x,y pairs)
+tools/plot_field.py --path my_path.json --inflate 0.6  # JSON [[x,y],...] or CSV; exit code 1 if it hits anything
+tools/plot_flight.py                                   # newest SITL flight log
+tools/plot_flight.py cubic.ulg carrot.ulg --labels cubic,carrot   # side by side
+```
+
+The same pieces are importable for planner work: `gnc_offboard.field_map.FieldMap` (obstacles,
+`clearance(x, y)`, `path_violations(path, inflate)`), `gnc_offboard.flight_log.load_ulog`, and
+`gnc_offboard.plotting.draw_field / draw_path`. `inflate` defaults to 0.5 m (x500 radius ~0.35 m
+plus 0.15 m margin). Flight logs live in `~/dev/PX4-Autopilot/build/px4_sitl_default/rootfs/log/`;
+copy ones worth keeping somewhere safe, since `make distclean` deletes them.
 
 ## Conventions (read before writing planner code)
 

@@ -5,3 +5,4 @@ matplotlib
 networkx     # graph search (A*, PRM roadmaps)
 shapely      # 2-D geometry: obstacle footprints, keep-out zones, field quadrants
 pyyaml
+pyulog       # read PX4 .ulg flight logs (tools/plot_flight.py)
