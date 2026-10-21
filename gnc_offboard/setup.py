@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'mission_demo = gnc_offboard.mission_demo:main',
+            'camera_fov = gnc_offboard.camera_fov:main',
         ],
     },
 )
