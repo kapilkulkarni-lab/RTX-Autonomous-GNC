@@ -78,15 +78,17 @@ if [ ! -d "$WS/src/px4_msgs" ]; then
     git clone -b "$branch" https://github.com/PX4/px4_msgs.git "$WS/src/px4_msgs"
 fi
 
-# Link the repo's package into the workspace so a `git pull` is all teammates need.
-link="$WS/src/gnc_offboard"
+# Link the repo's packages into the workspace.
+for package in avc_interfaces gnc_offboard; do
+link="$WS/src/$package"
 if [ -e "$link" ] && [ ! -L "$link" ]; then
-    bak="$WS/gnc_offboard.bak-$(date +%Y%m%d%H%M%S)"
+    bak="$WS/$package.bak-$(date +%Y%m%d%H%M%S)"
     mv "$link" "$bak"
     touch "$bak/COLCON_IGNORE"   # keep colcon from seeing a duplicate package
-    echo "Moved an older copy of gnc_offboard to $bak"
+    echo "Moved an older copy of $package to $bak"
 fi
-ln -sfn "$REPO/gnc_offboard" "$link"
+ln -sfn "$REPO/$package" "$link"
+done
 
 step "Building workspace (px4_msgs takes 5-15 min the first time; later runs skip it)"
 (
@@ -96,7 +98,7 @@ step "Building workspace (px4_msgs takes 5-15 min the first time; later runs ski
     set -e
     cd "$WS"
     colcon build --packages-skip-build-finished
-    colcon build --packages-select gnc_offboard
+    colcon build --packages-select avc_interfaces gnc_offboard
 )
 
 step "Sanity check"
