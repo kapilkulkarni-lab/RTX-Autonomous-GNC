@@ -9,6 +9,8 @@ from dataclasses import fields
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, HistoryPolicy
+from avc_interfaces.msg import TargetDetection
 from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Point32, PolygonStamped
 from nav_msgs.msg import OccupancyGrid
@@ -17,6 +19,12 @@ from px4_msgs.msg import VehicleOdometry
 from gnc_offboard.camera_model import CameraModel, CoverageGrid, contains_point
 from gnc_offboard.frames import FieldFrame
 from gnc_offboard.mission_demo import PX4_QOS
+
+
+DETECTION_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST, depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 
 class CameraFov(Node):
@@ -42,6 +50,8 @@ class CameraFov(Node):
         self.add_on_set_parameters_callback(self.parameters_changed)
         self.footprint_pub = self.create_publisher(PolygonStamped, '/camera/footprint', 1)
         self.coverage_pub = self.create_publisher(OccupancyGrid, '/camera/searched', 1)
+        self.detection_pub = self.create_publisher(
+            TargetDetection, '/camera/target_detection', DETECTION_QOS)
         self.create_subscription(VehicleOdometry, self.get_parameter('odometry_topic').value,
                                  self.on_odometry, PX4_QOS)
         self.last_receive = None
@@ -52,6 +62,7 @@ class CameraFov(Node):
         self.target = next((t for t in manifest['targets']
                             if t['color'] == manifest['scenario']['initial_target']), None)
         self.target_found = False
+        self.target_position = None
         self.observations = 0
         self.gz = None
         self.next_gz_attempt = 0.0
@@ -101,9 +112,18 @@ class CameraFov(Node):
             self.trajectory.append({'time_s': self.last_receive, 'position': None})
         self.trajectory.append({'time_s': self.last_receive, 'position': position})
         if self.target is not None:
-            self.target_found |= contains_point(polygon, (self.target['x'], self.target['y']))
+            if not self.target_found and contains_point(polygon, (self.target['x'], self.target['y'])):
+                self.target_found = True
+                self.target_position = (float(self.target['x']), float(self.target['y']), self.ground)
 
     def publish_visuals(self):
+        detection = TargetDetection()
+        detection.header.frame_id = 'map'
+        detection.header.stamp = self.get_clock().now().to_msg()
+        detection.found = self.target_found
+        if self.target_position is not None:
+            detection.position.x, detection.position.y, detection.position.z = self.target_position
+        self.detection_pub.publish(detection)
         fresh = self.last_receive is not None and time.monotonic()-self.last_receive < 1.0
         polygon = self.polygon if fresh else []
         footprint = PolygonStamped()
@@ -115,7 +135,7 @@ class CameraFov(Node):
         grid.header = footprint.header
         grid.info.resolution = self.grid.resolution
         grid.info.width, grid.info.height = self.grid.width, self.grid.height
-        grid.info.origin.position.x, grid.info.origin.position.y = self.grid.bounds[:2]
+        grid.info.origin.position.x, grid.info.origin.position.y = map(float, self.grid.bounds[:2])
         grid.info.origin.position.z = self.ground
         grid.info.origin.orientation.w = 1.0
         # 100 = searched; 0 = not yet searched, -1 = outside field.

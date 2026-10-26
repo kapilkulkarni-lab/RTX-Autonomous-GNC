@@ -258,6 +258,49 @@ python tools/plot_camera_coverage.py plots/camera_run_01.json \
 
 ### ROS outputs and model limits
 
+### Target detection interface
+
+`avc_interfaces/msg/TargetDetection` is the shared message definition for the
+simulated camera and future real perception. It contains `std_msgs/Header header`,
+`bool found`, and `geometry_msgs/Point position`.
+
+The camera node publishes `/camera/target_detection` at 2 Hz. Before the configured
+target centre enters an observed footprint, `found` is false and position must be
+ignored. After observation, `found` remains true and position contains the manifest
+target X/Y and configured ground Z, in field ENU metres (`header.frame_id = map`).
+The timestamp is publication time, not first detection time. Restarting the camera
+node resets detection and coverage. This is geometric detection without occlusion
+or image recognition; no mission or trajectory commands are sent.
+
+Publisher and future subscribers should use RELIABLE, TRANSIENT_LOCAL,
+KEEP_LAST depth 1. A late subscriber receives the latest retained status while
+the publisher is running. Detection uses each accepted odometry sample; status
+publication can add up to approximately 0.5 seconds of delay.
+
+For an existing installation, add the interface package to the workspace and build
+both packages (Ubuntu/WSL):
+
+```bash
+gnc
+deactivate 2>/dev/null
+ln -sfn "$AVC_SIM_DIR/avc_interfaces" "$GNC_WS/src/avc_interfaces"
+cd "$GNC_WS"
+colcon build --packages-select avc_interfaces gnc_offboard --symlink-install
+gnc
+ros2 interface show avc_interfaces/msg/TargetDetection
+```
+
+Start the simulator and `camera_fov` as above, then inspect status in another terminal:
+
+```bash
+gnc
+ros2 topic echo /camera/target_detection --qos-reliability reliable --qos-durability transient_local
+```
+
+New installations link both packages automatically through `setup_gnc_env.sh`.
+
+### Footprint and coverage outputs
+
 `/camera/footprint` is a `geometry_msgs/PolygonStamped` in field ENU (`map`).
 `/camera/searched` is a `nav_msgs/OccupancyGrid`: 100 means searched, 0 means
 not yet searched, and -1 means outside the field. To inspect their rates:
