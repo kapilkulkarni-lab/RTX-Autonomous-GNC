@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from dataclasses import fields
 
+import numpy as np
 import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
@@ -17,9 +18,12 @@ from nav_msgs.msg import OccupancyGrid
 from px4_msgs.msg import VehicleOdometry
 
 from gnc_offboard.camera_model import CameraModel, CoverageGrid, contains_point
+from gnc_offboard.coverage_colors import DARKEST_AT_S, sensing_color
 from gnc_offboard.frames import FieldFrame
 from gnc_offboard.mission_demo import PX4_QOS
 
+
+ODOMETRY_FRESH_S = 1.0
 
 DETECTION_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST, depth=1,
@@ -61,11 +65,14 @@ class CameraFov(Node):
         self.trajectory = []
         self.target = next((t for t in manifest['targets']
                             if t['color'] == manifest['scenario']['initial_target']), None)
+        # Manifest index identifies a die even when multiple dice share a color.
+        self.observed_dice = {}
         self.target_found = False
         self.target_position = None
         self.observations = 0
         self.gz = None
         self.next_gz_attempt = 0.0
+        self.gz_coverage_shades = None
         if self.get_parameter('gazebo_markers').value:
             try:
                 from gz.transport13 import Node as GzNode
@@ -74,7 +81,7 @@ class CameraFov(Node):
                 self.get_logger().warning('Gazebo Python bindings unavailable; ROS coverage remains enabled.')
         self.control_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self.create_timer(.5, self.publish_visuals, clock=self.control_clock)
-        self.get_logger().info('Camera coverage active: cyan=current view, orange=searched ground.')
+        self.get_logger().info('Camera coverage active: cyan=current view, darker orange=more sensing time.')
 
     def read_model(self, changes=None):
         values = {f.name: self.get_parameter(f.name).value for f in fields(CameraModel)}
@@ -100,21 +107,35 @@ class CameraFov(Node):
                                                   self.grid.bounds, self.ground)
         except ValueError:
             return
+        now = time.monotonic()
+        elapsed = now - self.last_receive if self.last_receive is not None else 0.0
         self.last_timestamp = msg.timestamp
-        self.last_receive = time.monotonic()
+        self.last_receive = now
         self.origin, self.polygon = origin, polygon
-        self.grid.update(polygon)
+        self.grid.update(polygon, elapsed if elapsed < ODOMETRY_FRESH_S else 0.0)
         self.observations += 1
         # Record vehicle position, not the translated camera origin. Preserve
         # sample gaps as breaks rather than inventing a flight path across them.
         position = [float(value) for value in self.frame.to_field(*msg.position)]
-        if self.trajectory and self.last_receive-self.trajectory[-1]['time_s'] > 1.0:
+        if self.trajectory and self.last_receive-self.trajectory[-1]['time_s'] >= ODOMETRY_FRESH_S:
             self.trajectory.append({'time_s': self.last_receive, 'position': None})
         self.trajectory.append({'time_s': self.last_receive, 'position': position})
-        if self.target is not None:
-            if not self.target_found and contains_point(polygon, (self.target['x'], self.target['y'])):
+        for index, die in enumerate(self.manifest['targets']):
+            if index in self.observed_dice:
+                continue
+            if not contains_point(polygon, (die['x'], die['y'])):
+                continue
+            position = (float(die['x']), float(die['y']), self.ground)
+            self.observed_dice[index] = {
+                'color': die['color'], 'position_enu': list(position),
+            }
+            east, north, up = position
+            self.get_logger().info(
+                f"Observed {die['color']} die at field ENU "
+                f"(E={east:.4f}, N={north:.4f}, U={up:z.4f}) m")
+            if die is self.target:
                 self.target_found = True
-                self.target_position = (float(self.target['x']), float(self.target['y']), self.ground)
+                self.target_position = position
 
     def publish_visuals(self):
         detection = TargetDetection()
@@ -124,7 +145,7 @@ class CameraFov(Node):
         if self.target_position is not None:
             detection.position.x, detection.position.y, detection.position.z = self.target_position
         self.detection_pub.publish(detection)
-        fresh = self.last_receive is not None and time.monotonic()-self.last_receive < 1.0
+        fresh = self.last_receive is not None and time.monotonic()-self.last_receive < ODOMETRY_FRESH_S
         polygon = self.polygon if fresh else []
         footprint = PolygonStamped()
         footprint.header.frame_id = 'map'
@@ -183,17 +204,30 @@ class CameraFov(Node):
         if not triangles:
             current.action = Marker.DELETE_MARKER
         self.gz.request('/marker', current, Marker, Empty, 5)
-        cells = []
+        shades = np.minimum(self.grid.exposure_s, DARKEST_AT_S).astype(int)
+        shades[~self.grid.searched] = -1
+        previous = self.gz_coverage_shades
+        if previous is None:
+            # Clear any persistent coverage markers from an earlier recorder.
+            changed = range(DARKEST_AT_S + 1)
+        else:
+            moved = previous != shades
+            changed = np.union1d(previous[moved], shades[moved])
         half = self.grid.resolution/2
         xmin, ymin, xmax, ymax = self.grid.bounds
-        for x, y in self.grid.centres[self.grid.searched]:
-            a, b = max(xmin, x-half), min(xmax, x+half)
-            c, d = max(ymin, y-half), min(ymax, y+half)
-            cells.extend([(a, c), (b, c), (b, d), (a, c), (b, d), (a, d)])
-        coverage = marker(2, cells, (1.0, .55, .05, .4), .02)
-        if not cells:
-            coverage.action = Marker.DELETE_MARKER
-        self.gz.request('/marker', coverage, Marker, Empty, 5)
+        for shade in changed:
+            if shade < 0:
+                continue
+            cells = []
+            for x, y in self.grid.centres[shades == shade]:
+                a, b = max(xmin, x-half), min(xmax, x+half)
+                c, d = max(ymin, y-half), min(ymax, y+half)
+                cells.extend([(a, c), (b, c), (b, d), (a, c), (b, d), (a, d)])
+            coverage = marker(2 + int(shade), cells, (*sensing_color(shade), .75), .02)
+            if not cells:
+                coverage.action = Marker.DELETE_MARKER
+            self.gz.request('/marker', coverage, Marker, Empty, 5)
+        self.gz_coverage_shades = shades
 
     def save(self):
         output = self.get_parameter('output').value
@@ -206,6 +240,7 @@ class CameraFov(Node):
                 'bounds': self.grid.bounds, 'resolution_m': self.grid.resolution,
                 'searched_area_m2': self.grid.area_m2,
                 'searched_cell_centres': self.grid.centres[self.grid.searched].tolist(),
+                'searched_cell_exposure_s': self.grid.exposure_s[self.grid.searched].tolist(),
                 'arena_area_m2': ((self.grid.bounds[2]-self.grid.bounds[0])
                                   * (self.grid.bounds[3]-self.grid.bounds[1])),
                 'trajectory_enu': [None if sample['position'] is None else
@@ -213,6 +248,8 @@ class CameraFov(Node):
                                    for sample in self.trajectory],
                 'target_found': (self.target_found if self.target is not None
                                  and self.observations else None),
+                'observed_dice_frame': 'field ENU metres',
+                'observed_dice': list(self.observed_dice.values()),
                 'target_found_method': 'target centre inside an observed ground footprint',
             }
             path.write_text(json.dumps(coverage, indent=2))

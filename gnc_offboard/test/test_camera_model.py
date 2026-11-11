@@ -98,3 +98,16 @@ def test_coverage_area_clips_partial_edge_cells():
     grid = CoverageGrid((0, 0, 1.2, 1.2), .5)
     grid.searched[:] = True
     assert grid.area_m2 == pytest.approx(1.44)
+
+
+def test_coverage_accumulates_revisits_on_the_previous_footprint():
+    grid = CoverageGrid([0, 0, 2, 1], resolution=1)
+    left = np.array([(0, 0), (1, 0), (1, 1), (0, 1)])
+    right = left + [1, 0]
+    grid.update(left)
+    grid.update(right, .25)
+    grid.update(left, .75)
+    grid.update([], .5)
+    grid.update([], .5)
+    np.testing.assert_allclose(grid.exposure_s, [[.75, .75]])
+    assert grid.searched.all()

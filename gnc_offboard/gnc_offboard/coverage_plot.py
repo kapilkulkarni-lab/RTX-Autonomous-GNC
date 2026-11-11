@@ -3,6 +3,8 @@ from pathlib import Path
 
 import numpy as np
 
+from gnc_offboard.coverage_colors import DARKEST_AT_S, sensing_color
+
 
 def coverage_summary(coverage, manifest):
     """Report clipped cell area; older exports can only estimate target coverage."""
@@ -33,6 +35,7 @@ def coverage_summary(coverage, manifest):
 
 def save_coverage_png(coverage, manifest_path, output):
     # Use a standalone Agg canvas so export also works without a display.
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.collections import PolyCollection
@@ -53,8 +56,21 @@ def save_coverage_png(coverage, manifest_path, output):
         left, right = max(xmin, x-half), min(xmax, x+half)
         bottom, top = max(ymin, y-half), min(ymax, y+half)
         cells.append([(left, bottom), (right, bottom), (right, top), (left, top)])
-    ax.add_collection(PolyCollection(cells, facecolors='#ffad42', edgecolors='none',
-                                     alpha=.55, zorder=2))
+    exposure = coverage.get('searched_cell_exposure_s')
+    if exposure is None:
+        ax.add_collection(PolyCollection(cells, facecolors='#ffad42', edgecolors='none',
+                                         alpha=.55, zorder=2))
+    else:
+        colors = LinearSegmentedColormap.from_list(
+            'sensing_time', [sensing_color(0), sensing_color(DARKEST_AT_S)])
+        layer = PolyCollection(cells, cmap=colors, norm=Normalize(0, DARKEST_AT_S, clip=True),
+                               edgecolors='none', zorder=2)
+        layer.set_array(np.asarray(exposure))
+        ax.add_collection(layer)
+        legend = fig.colorbar(layer, ax=ax, orientation='horizontal', pad=.06,
+                              ticks=[0, 5, 10, 15, 20, 25, DARKEST_AT_S])
+        legend.ax.set_xticklabels(['0', '5', '10', '15', '20', '25', f'{DARKEST_AT_S}+'])
+        legend.set_label('Accumulated sensing time (real seconds)')
     trajectory = coverage.get('trajectory_enu', [])
     if trajectory:
         xy = np.array([p[:2] if p is not None else [np.nan, np.nan] for p in trajectory])
@@ -66,7 +82,8 @@ def save_coverage_png(coverage, manifest_path, output):
              fontsize=12)
     fig.text(.11, .902, status, fontsize=11)
     path_note = 'blue dotted = recorded drone path' if trajectory else 'drone path not recorded in this export'
-    fig.text(.11, .875, f'Orange = searched ground; {path_note}.', fontsize=10, color='#52514e')
+    shading = 'Darker = more sensing time' if exposure is not None else 'Orange = searched ground'
+    fig.text(.11, .875, f'{shading}; {path_note}.', fontsize=10, color='#52514e')
     fig.text(.5, .035, 'North is up · Flat-ground projection.',
              ha='center', fontsize=9, color='#52514e')
     fig.subplots_adjust(left=.11, right=.97, bottom=.10, top=.845)
