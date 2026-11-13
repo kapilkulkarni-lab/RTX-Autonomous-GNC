@@ -8,11 +8,20 @@ Guidance between waypoints (parameter `guidance`):
             Publishes position + velocity + acceleration feedforward and yaw/yaw rate.
     carrot  the original moving setpoint at constant speed, position only.
 
+Per-waypoint speed:
+    `waypoints` is a flat list of field x, y, speed triples. The speed applies to the leg
+    flying INTO that waypoint (carrot speed, or cubic peak speed). A speed of 0 means
+    "use the default `speed` parameter". The takeoff climb always uses `speed`.
+    Planners that replace `self.waypoints` should also set `self.wp_speeds` (one entry per
+    waypoint, None = default). If they don't, every leg falls back to `speed`.
+
 Run (sim + agent already up, drone landed and disarmed):
     ros2 run gnc_offboard mission_demo
     ros2 run gnc_offboard mission_demo --ros-args -p speed:=0.8 -p max_accel:=0.4
     ros2 run gnc_offboard mission_demo --ros-args -p guidance:=carrot
-    ros2 run gnc_offboard mission_demo --ros-args -p waypoints:="[0.0, 0.0, 3.0, -2.0]"
+    # fast transit to (3,-2), slow approach to (3.5,-2), default speed home to (0,0)
+    ros2 run gnc_offboard mission_demo --ros-args \\
+        -p waypoints:="[3.0, -2.0, 1.5,  3.5, -2.0, 0.3,  0.0, 0.0, 0.0]"
 """
 import json
 import math
@@ -53,7 +62,7 @@ class MissionDemo(Node):
         self.declare_parameter('guidance', 'cubic')      # 'cubic' or 'carrot'
         self.declare_parameter('acceptance_radius', 0.25)
         self.declare_parameter('hover_time', 3.0)        # s at each waypoint
-        self.declare_parameter('waypoints', Parameter.Type.DOUBLE_ARRAY)  # field x,y pairs
+        self.declare_parameter('waypoints', Parameter.Type.DOUBLE_ARRAY)  # field x,y,speed
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
         self.alt, self.speed, self.max_accel = p('altitude'), p('speed'), p('max_accel')
@@ -69,11 +78,19 @@ class MissionDemo(Node):
             field_wps = p('waypoints')
         except ParameterUninitializedException:
             field_wps = None  # not given on the command line: use the demo mission
+        speeds = None
         if field_wps:
-            if len(field_wps) % 2:
-                raise ValueError('waypoints must be x,y pairs')
-            pts = list(zip(field_wps[0::2], field_wps[1::2]))
-            self.get_logger().info(f'Flying {len(pts)} custom waypoints')
+            if len(field_wps) % 3:
+                raise ValueError('waypoints must be x,y,speed triples (speed 0 = default)')
+            pts = list(zip(field_wps[0::3], field_wps[1::3]))
+            speeds = []
+            for i, s in enumerate(field_wps[2::3]):
+                if not math.isfinite(s) or s < 0.0:
+                    raise ValueError(f'waypoint {i}: speed must be >= 0, got {s}')
+                speeds.append(s if s > 0.0 else None)   # 0 -> default speed
+            self.get_logger().info(
+                f'Flying {len(pts)} custom waypoints, speeds '
+                + ', '.join(f'{s:.2f}' if s else 'default' for s in speeds))
         else:
             color = manifest['scenario']['initial_target']
             die = next(t for t in manifest['targets'] if t['color'] == color)
@@ -84,6 +101,8 @@ class MissionDemo(Node):
                 'will return to start zone and land')
         # Mission waypoints in PX4 local NED; the takeoff point is prepended at arming.
         self.waypoints = [self.frame.to_ned(x, y, self.alt) for x, y in pts]
+        # Speed for the leg INTO each waypoint; None = use the `speed` parameter.
+        self.wp_speeds = speeds if speeds is not None else [None] * len(self.waypoints)
 
         self.pos = None          # latest VehicleLocalPosition
         self.status = None       # latest VehicleStatus
@@ -174,9 +193,14 @@ class MissionDemo(Node):
                 and s.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD)
 
     # ---------------------------------------------------------------- guidance
-    def advance_carrot(self, target):
+    def leg_speed(self, idx):
+        """Speed for the leg into waypoint `idx`, falling back to the `speed` parameter."""
+        s = self.wp_speeds[idx] if idx < len(self.wp_speeds) else None
+        return s if s else self.speed
+
+    def advance_carrot(self, target, speed):
         """Carrot guidance: move the setpoint toward `target` at `speed`, position only."""
-        step = self.speed / RATE_HZ
+        step = speed / RATE_HZ
         d = [t - c for t, c in zip(target, self.carrot)]
         dist = math.sqrt(sum(v * v for v in d))
         if dist <= step:
@@ -187,17 +211,18 @@ class MissionDemo(Node):
             self.yaw = math.atan2(d[1], d[0])
         self.publish_setpoint(self.carrot, self.yaw)
 
-    def advance_cubic(self, target):
+    def advance_cubic(self, target, speed):
         """Cubic guidance: sample the time-defined segment and publish the full state."""
         now = self.now_s()
         if self.segment is None:
             # New segment starts from the last setpoint (where the vehicle is holding).
             dn, de = target[0] - self.carrot[0], target[1] - self.carrot[1]
             yaw1 = math.atan2(de, dn) if math.hypot(dn, de) > 0.3 else self.yaw
-            self.segment = CubicSegment(self.carrot, target, now, self.speed,
+            self.segment = CubicSegment(self.carrot, target, now, speed,
                                         self.max_accel, yaw0=self.yaw, yaw1=yaw1)
             self.get_logger().info(
-                f'Segment {self.wp_idx}: {self.segment.length:.2f} m in {self.segment.T:.1f} s')
+                f'Segment {self.wp_idx}: {self.segment.length:.2f} m in {self.segment.T:.1f} s '
+                f'(peak speed {speed:.2f} m/s)')
         pos, vel, acc, yaw, yawspeed = self.segment.sample(now)
         if self.segment.done(now):
             pos = list(target)   # land exactly on the waypoint, no float drift
@@ -241,7 +266,12 @@ class MissionDemo(Node):
             self.publish_setpoint(self.carrot, self.yaw)
             if self.armed_offboard():
                 n, e, _ = self.vehicle_ned()
+                # Keep speeds aligned with waypoints even if a planner replaced only
+                # self.waypoints; missing entries mean "default speed".
+                k = len(self.waypoints)
+                self.wp_speeds = (list(self.wp_speeds) + [None] * k)[:k]
                 self.waypoints.insert(0, (n, e, -self.alt))  # climb in place first
+                self.wp_speeds.insert(0, None)               # climb at default speed
                 self.get_logger().info('Armed in offboard. Taking off.')
                 self.state = 'FLYING'
             elif self.now_s() - self.last_cmd_time > 1.0:
@@ -257,10 +287,11 @@ class MissionDemo(Node):
             return
 
         target = self.waypoints[self.wp_idx]
+        speed = self.leg_speed(self.wp_idx)
         if self.guidance == 'cubic':
-            self.advance_cubic(target)
+            self.advance_cubic(target, speed)
         else:
-            self.advance_carrot(target)
+            self.advance_carrot(target, speed)
 
         err = math.dist(self.vehicle_ned(), target)
         if self.carrot == list(target) and err < self.acc_r:
