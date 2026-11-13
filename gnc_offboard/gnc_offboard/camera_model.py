@@ -120,15 +120,21 @@ class CoverageGrid:
         self.centres = np.stack([xx, yy], axis=-1)
         self.searched = np.zeros((self.height, self.width), dtype=bool)
         self.valid = (xx <= xmax) & (yy <= ymax)
+        self.exposure_s = np.zeros_like(xx)
+        self.in_view = np.zeros_like(self.searched)
 
-    def update(self, polygon):
+    def update(self, polygon, elapsed_s=0.0):
+        """Credit elapsed real time to the footprint held since the previous sample."""
+        self.exposure_s[self.in_view] += elapsed_s
         if len(polygon) < 3:
+            self.in_view.fill(False)
             return
         inside = self.valid.copy()
         for a, b in zip(polygon, np.roll(polygon, -1, axis=0)):
             d = b-a
             inside &= (d[0]*(self.centres[..., 1]-a[1])
                        - d[1]*(self.centres[..., 0]-a[0])) >= -1e-9
+        self.in_view = inside
         self.searched |= inside
 
     @property

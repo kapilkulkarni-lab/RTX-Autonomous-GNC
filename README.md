@@ -267,7 +267,9 @@ simulated camera and future real perception. It contains `std_msgs/Header header
 The camera node publishes `/camera/target_detection` at 2 Hz. Before the configured
 target centre enters an observed footprint, `found` is false and position must be
 ignored. After observation, `found` remains true and position contains the manifest
-target X/Y and configured ground Z, in field ENU metres (`header.frame_id = map`).
+target ground location in field ENU metres (`header.frame_id = map`). The origin
+is the field center. Position x is east, y is north, and z is up. The coverage
+JSON saves each recorded die as `position_enu` in the same frame.
 The timestamp is publication time, not first detection time. Restarting the camera
 node resets detection and coverage. This is geometric detection without occlusion
 or image recognition; no mission or trajectory commands are sent.
@@ -365,3 +367,122 @@ copy ones worth keeping somewhere safe, since `make distclean` deletes them.
 
 1. May a UAV fly *over* obstacles, or must it avoid them in 2-D? The rules say obstacles are things "the UGV can not drive over" but also that all other objects "shall be avoided."
 2. Real dimensions of the boxes, cones and buckets. `OBSTACLE_TYPES` in `generate_avc_world.py` uses estimates.
+
+
+### Reading the sensing-time overlay
+
+The live camera overlay keeps the current footprint cyan. Previously sensed cells
+darken one shade for every accumulated real second in the projected footprint.
+Revisits add to the same total. Time is measured between fresh odometry samples,
+with gaps of one second or longer excluded. The saved PNG includes a seconds
+legend. Both displays use the darkest shade at 30 seconds and above, while
+`searched_cell_exposure_s` in the JSON preserves the full duration for each entry
+in `searched_cell_centres`. Unshaded ground has no recorded coverage.
+
+
+## Comparing fixed search patterns
+
+Six separate executables share `mission_demo`'s takeoff, guidance, and landing:
+`mission_lawnmower`, `mission_spiral_out`, `mission_spiral_in`, `mission_frontier`,
+`mission_zones`, and `mission_hybrid`. Each plans once before flight. Camera
+sightings never change the route or end the search early. Frontier predicts coverage
+before takeoff; hybrid flies every other row and then fills the remaining rows.
+
+Build after adding these nodes (from the repository):
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/dev/ros2_ws/install/setup.bash
+colcon build --symlink-install --packages-select gnc_offboard
+source install/setup.bash
+```
+
+With the simulator and XRCE agent running, start a fresh camera recorder in one
+terminal before each flight. Use a different output filename for every pattern:
+
+```bash
+gnc
+cd ~/dev/avc-gnc
+source install/setup.bash
+ros2 run gnc_offboard camera_fov --ros-args -p output:="$PWD/plots/lawnmower.json"
+```
+
+In a second terminal, run the selected mission:
+
+```bash
+gnc
+cd ~/dev/avc-gnc
+source install/setup.bash
+ros2 run gnc_offboard mission_lawnmower --ros-args -p altitude:=1.5 -p speed:=1.0
+```
+
+After landing, stop the camera with Ctrl+C to save its JSON and PNG. Restart it
+for the next pattern to clear prior sightings and coverage. Run one mission at a
+time, starting landed at the same spawn position. Keep the world/seed, altitude,
+speed, guidance, camera geometry, overlap, and recorder start/stop procedure the
+same between runs. `return_home` defaults to true; false lands at the last point.
+
+```bash
+python tools/compare_search_runs.py plots/lawnmower.json plots/spiral_in.json
+```
+
+The comparison reports measured ground coverage, number of distinct dice observed,
+target-found status, and recorded horizontal distance (excluding sample gaps).
+These metrics include all odometry received while the recorder is running.
+Use `tools/plot_flight.py` on the corresponding ULog for flight duration and tracking
+metrics. The coverage PNG shows the actual recorded flight path.
+
+Flight bounds come from the manifest inset by `margin` (default 1 m). Row spacing
+uses `fov_deg` (70 degrees) and `overlap` (0.2), a downward-camera approximation;
+actual coverage is measured by the independent camera model, whose default mount
+is angled 45 degrees down. Full coverage is an experimental result, not guaranteed.
+Optional `obstacles` are explicit `[x,y,radius,...]` circles; they are not loaded
+from the manifest. Supplied obstacles route the return leg too, and a failed detour
+rejects the mission before flight. Omitting them evaluates the raw search paths.
+
+
+### Search regions and no-fly areas
+
+All six search missions accept regions at launch through ROS parameters. For example,
+search the north half and avoid a rectangle around the center:
+
+```bash
+ros2 run gnc_offboard mission_lawnmower --ros-args \
+  -p region_names:="['north half']" \
+  -p keepouts:="[-1.0, -1.0, 1.0, 1.0]" \
+  -p clearance:=0.5
+```
+
+To search only the northeast and southwest quadrants, pass them to `region_names`:
+
+```bash
+ros2 run gnc_offboard mission_lawnmower --ros-args \
+  -p region_names:="['ne quadrant', 'sw quadrant']"
+```
+
+To search the field while avoiding the northwest quadrant, pass it to `keepout_names`:
+
+```bash
+ros2 run gnc_offboard mission_lawnmower --ros-args \
+  -p keepout_names:="['nw quadrant']"
+```
+
+The quadrant names are `ne quadrant`, `nw quadrant`, `se quadrant`, and
+`sw quadrant`. Both parameters accept lists and can be used in the same command.
+
+Use `regions` and `keepouts` for one or more rectangles, each specified by two
+opposite corners as `[x0, y0, x1, y1, ...]` in field metres (east, north).
+Use decimal values for ROS double arrays. `region_names` and `keepout_names`
+accept field names such as `north half`, `se quadrant`, `east third`, and
+`center`. Named and numeric rectangles can be combined. If you supply only
+keepouts, the mission searches the full flyable area around them.
+
+The planner clips the search rectangles to the flight bounds, removes buffered
+keepouts, and applies the selected pattern to each remaining piece. The zones
+mission applies its grid and zone settings separately to each piece. Transit
+may cross unselected search areas. All planned legs, including return home,
+are routed around the keepouts, and an unroutable leg rejects the mission
+before arming. When region or keepout inputs are present, circular obstacles
+are conservatively buffered as bounding rectangles so the same route clears
+both types. Keepout checks apply to planned setpoints; actual clearance depends
+on vehicle tracking.

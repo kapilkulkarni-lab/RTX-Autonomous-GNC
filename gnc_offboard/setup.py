@@ -20,6 +20,12 @@ setup(
     entry_points={
         'console_scripts': [
             'mission_demo = gnc_offboard.mission_demo:main',
+            'mission_lawnmower = gnc_offboard.mission_lawnmower:main',
+            'mission_spiral_in = gnc_offboard.mission_spiral_in:main',
+            'mission_spiral_out = gnc_offboard.mission_spiral_out:main',
+            'mission_frontier = gnc_offboard.mission_frontier:main',
+            'mission_zones = gnc_offboard.mission_zones:main',
+            'mission_hybrid = gnc_offboard.mission_hybrid:main',
             'camera_fov = gnc_offboard.camera_fov:main',
         ],
     },

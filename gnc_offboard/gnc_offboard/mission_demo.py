@@ -204,6 +204,9 @@ class MissionDemo(Node):
         self.carrot, self.yaw = pos, yaw
         self.publish_setpoint(pos, yaw, vel, acc, yawspeed)
 
+    def prepare_takeoff(self):
+        """Allow missions to validate their route against the live launch position."""
+
     # ---------------------------------------------------------------- state machine
     def tick(self):
         if self.state == 'WAIT_POS':
@@ -211,6 +214,7 @@ class MissionDemo(Node):
                 self.get_logger().info('Waiting for a valid position estimate...',
                                        throttle_duration_sec=2.0)
                 return
+            self.prepare_takeoff()
             self.carrot = self.vehicle_ned()
             self.yaw = self.pos.heading
             self.state = 'STREAM'
@@ -275,9 +279,10 @@ class MissionDemo(Node):
                     self.state = 'LANDING'
 
 
-def main():
-    rclpy.init()
-    node = MissionDemo()
+def run_mission(node_class=MissionDemo, args=None):
+    """Discover PX4 and start the shared executor for any waypoint mission."""
+    rclpy.init(args=args)
+    node = node_class()
     # Wait for DDS discovery to see PX4, so versioned topic names resolve correctly.
     pat = re.compile(r'/fmu/out/vehicle_local_position(_v\d+)?')
     deadline = node.now_s() + 20.0
@@ -298,6 +303,10 @@ def main():
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def main(args=None):
+    run_mission(args=args)
 
 
 if __name__ == '__main__':
