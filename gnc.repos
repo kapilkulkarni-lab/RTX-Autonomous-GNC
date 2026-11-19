@@ -1,0 +1,10 @@
+# vcstool manifest for repos GNC builds against but does not own.
+# Import next to this repo (setup_gnc_env.sh does this):  vcs import ~/dev < gnc.repos
+# Only src/avc_msgs is linked into the ROS 2 workspace; avc_comms is not built here.
+# avc_msgs is owned by Comms: never edit it here. Bump the pin only after checking with Comms.
+repositories:
+  avc-comms-ws:
+    type: git
+    url: https://code.vt.edu/avc-fall-2026/comms-llm/avc-comms-ws.git
+    # branch parser-bridge-quadrant-masks
+    version: 366e2baa7699a366d8a8696510e5c55e605ab813

@@ -6,7 +6,8 @@ Simulation and offboard-control stack for the GNC team (path planning and drone 
 
 | File | What it does |
 |---|---|
-| `setup_gnc_env.sh` | One-time setup. Builds the XRCE agent, the Python venv, and the ROS 2 workspace (px4_msgs + gnc_offboard), and adds the `gnc` shortcut. Safe to re-run. |
+| `setup_gnc_env.sh` | One-time setup. Builds the XRCE agent, the Python venv, and the ROS 2 workspace (px4_msgs, comms' avc_msgs, avc_interfaces, gnc_offboard), and adds the `gnc` shortcut. Safe to re-run. |
+| `gnc.repos` | vcstool manifest pinning comms' `avc-comms-ws` (source of `avc_msgs`) to an exact commit. |
 | `start_sim.sh` | Starts Gazebo, PX4, the agent and a dev shell in one tmux window. `-H` runs without the Gazebo window. |
 | `doctor.sh` | Health check. Run it while the sim is up and it reports what's working and what isn't: builds, processes, agent count, and whether ROS 2 can see PX4's topics. |
 | `gnc_env.sh` | Loads ROS 2, the workspace and the venv in the right order. You normally just type `gnc`. |
@@ -51,7 +52,27 @@ git clone <THIS_REPO_URL> avc-gnc
 cd avc-gnc
 ./setup_gnc_env.sh
 ```
-The first run takes 10–20 min, most of it building px4_msgs. It ends by printing `OK: rclpy + px4_msgs import`. Open a new terminal when it's done.
+The first run takes 10–20 min, most of it building px4_msgs. It ends by printing `OK: rclpy + px4_msgs + avc_msgs + avc_interfaces import`. Open a new terminal when it's done.
+
+**Step 4: comms messages (`avc_msgs`)**
+
+`setup_gnc_env.sh` already does this step; the commands are here so you can do it by hand or check it.
+`avc_msgs` (Intent, MissionState, NfcResult, LlmHeartbeat) belongs to Comms and lives in the
+`avc-comms-ws` repo on code.vt.edu. `gnc.repos` pins it to one commit (currently `366e2ba` on
+`parser-bridge-quadrant-masks`). You need code.vt.edu access with your Git credentials cached;
+never put a token in a file. Only `avc_msgs` is linked into the workspace, and it must be built
+before `gnc_offboard`. **Never edit files in `avc_msgs`**; send field changes to Comms instead.
+```bash
+deactivate 2>/dev/null
+vcs import ~/dev < ~/dev/avc-gnc/gnc.repos          # clones ~/dev/avc-comms-ws at the pinned commit
+ln -sfn ~/dev/avc-comms-ws/src/avc_msgs   ~/dev/ros2_ws/src/avc_msgs
+ln -sfn ~/dev/avc-gnc/avc_interfaces      ~/dev/ros2_ws/src/avc_interfaces
+cd ~/dev/ros2_ws
+colcon build --packages-select avc_msgs                       # first
+colcon build --packages-select avc_interfaces gnc_offboard    # then GNC's packages
+source install/setup.bash
+ros2 interface show avc_msgs/msg/MissionState
+```
 
 ## Daily use
 
@@ -74,6 +95,11 @@ Quick manual test in the PX4 pane: `commander takeoff`, then `commander land`.
 **After a `git pull`:** if `gnc_offboard` changed, rebuild it (takes seconds):
 ```bash
 deactivate 2>/dev/null; cd ~/dev/ros2_ws && colcon build --packages-select gnc_offboard; gnc
+```
+If `gnc.repos` changed (new comms pin) or `avc_interfaces` changed, re-import and rebuild in order:
+```bash
+deactivate 2>/dev/null; vcs import ~/dev < ~/dev/avc-gnc/gnc.repos
+cd ~/dev/ros2_ws && colcon build --packages-select avc_msgs avc_interfaces gnc_offboard; gnc
 ```
 
 ## Projected camera view and searched ground

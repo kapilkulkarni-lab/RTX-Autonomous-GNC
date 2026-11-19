@@ -3,7 +3,8 @@
 #
 # Prerequisites (see README): Ubuntu 24.04 (native or WSL2), PX4-Autopilot cloned and
 # its Tools/setup/ubuntu.sh run, ROS 2 Jazzy installed. This script does the rest:
-#   XRCE-DDS agent, Python venv, px4_msgs + gnc_offboard workspace build, `gnc` shortcut.
+#   XRCE-DDS agent, Python venv, comms avc_msgs (pinned in gnc.repos), px4_msgs +
+#   avc_interfaces + gnc_offboard workspace build, `gnc` shortcut.
 #
 # Paths default to ~/dev/...; override with e.g.  PX4_DIR=/elsewhere ./setup_gnc_env.sh
 set -eo pipefail
@@ -29,6 +30,7 @@ step "Checking prerequisites"
 [ -f "/opt/ros/$DISTRO/setup.bash" ] || die "ROS 2 $DISTRO is not installed (README step 2)"
 [ -d "$PX4_DIR" ] || die "PX4 not found at $PX4_DIR (README step 1), or set PX4_DIR=..."
 command -v gz >/dev/null || die "Gazebo (gz) not found: run $PX4_DIR/Tools/setup/ubuntu.sh"
+command -v vcs >/dev/null || die "vcstool (vcs) not found: sudo apt install ros-dev-tools (README step 2)"
 echo "ROS 2 $DISTRO, PX4 at $PX4_DIR, repo at $REPO"
 
 step "System packages"
@@ -78,17 +80,30 @@ if [ ! -d "$WS/src/px4_msgs" ]; then
     git clone -b "$branch" https://github.com/PX4/px4_msgs.git "$WS/src/px4_msgs"
 fi
 
-# Link the repo's packages into the workspace.
-for package in avc_interfaces gnc_offboard; do
-link="$WS/src/$package"
-if [ -e "$link" ] && [ ! -L "$link" ]; then
-    bak="$WS/$package.bak-$(date +%Y%m%d%H%M%S)"
-    mv "$link" "$bak"
-    touch "$bak/COLCON_IGNORE"   # keep colcon from seeing a duplicate package
-    echo "Moved an older copy of $package to $bak"
-fi
-ln -sfn "$REPO/$package" "$link"
-done
+# Comms-owned avc_msgs, pinned in gnc.repos. Re-running checks out the pinned commit again,
+# so a changed pin is picked up. vcs refuses to touch a clone with local changes; that is on
+# purpose, because nobody on GNC edits avc_msgs.
+step "Comms messages (avc_msgs, pinned in gnc.repos)"
+vcs import "$GNC_ROOT" < "$REPO/gnc.repos"
+COMMS_DIR="$GNC_ROOT/avc-comms-ws"
+[ -d "$COMMS_DIR/src/avc_msgs/msg" ] || die "avc_msgs not found at $COMMS_DIR/src/avc_msgs after vcs import"
+echo "avc-comms-ws at $(git -C "$COMMS_DIR" rev-parse --short HEAD)"
+
+# Link packages into the workspace: the repo's own, plus avc_msgs only from the comms clone
+# (its avc_comms package is not built here).
+link_package() {  # link_package <name> <target dir>
+    local package="$1" target="$2" link="$WS/src/$1" bak
+    if [ -e "$link" ] && [ ! -L "$link" ]; then
+        bak="$WS/$package.bak-$(date +%Y%m%d%H%M%S)"
+        mv "$link" "$bak"
+        touch "$bak/COLCON_IGNORE"   # keep colcon from seeing a duplicate package
+        echo "Moved an older copy of $package to $bak"
+    fi
+    ln -sfn "$target" "$link"
+}
+link_package avc_interfaces "$REPO/avc_interfaces"
+link_package gnc_offboard "$REPO/gnc_offboard"
+link_package avc_msgs "$COMMS_DIR/src/avc_msgs"
 
 step "Building workspace (px4_msgs takes 5-15 min the first time; later runs skip it)"
 (
@@ -98,7 +113,8 @@ step "Building workspace (px4_msgs takes 5-15 min the first time; later runs ski
     set -e
     cd "$WS"
     colcon build --packages-skip-build-finished
-    colcon build --packages-select avc_interfaces gnc_offboard
+    # avc_msgs first: gnc_offboard depends on it.
+    colcon build --packages-select avc_msgs avc_interfaces gnc_offboard
 )
 
 step "Sanity check"
@@ -109,7 +125,7 @@ step "Sanity check"
     # shellcheck disable=SC1091
     source "$WS/install/setup.bash"
     set -e
-    "$VENV/bin/python" -c "import rclpy, px4_msgs.msg, numpy; print('OK: rclpy + px4_msgs import in the venv, numpy', numpy.__version__)"
+    "$VENV/bin/python" -c "import rclpy, px4_msgs.msg, avc_msgs.msg, avc_interfaces.msg, numpy; print('OK: rclpy + px4_msgs + avc_msgs + avc_interfaces import in the venv, numpy', numpy.__version__)"
 )
 
 step "Shell shortcut"

@@ -6,6 +6,9 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TargetDetection.msg"
+  "msg/ColorCheck.msg"
+  "msg/DiceMapEntry.msg"
+  "msg/DiceMap.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

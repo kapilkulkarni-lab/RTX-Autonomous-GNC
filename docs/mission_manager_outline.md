@@ -19,7 +19,7 @@ Rules for the builder:
 | Item | Value |
 | --- | --- |
 | Repo | `kapilkulkarni-lab/RTX-Autonomous-GNC` (packages `avc_interfaces`, `gnc_offboard`) |
-| Comms messages | `avc_msgs` from `avc-comms-ws`, branch `parser-bridge-quadrant-masks`, pinned to commit `375598d`. Cloned into the `gnc` account and linked into `~/dev/ros2_ws/src`; built before `gnc_offboard` |
+| Comms messages | `avc_msgs` from `avc-comms-ws`, branch `parser-bridge-quadrant-masks`, pinned to commit `366e2ba`. Cloned into the `gnc` account and linked into `~/dev/ros2_ws/src`; built before `gnc_offboard` |
 | OS / ROS | Ubuntu 24.04, ROS 2 Jazzy, colcon, Python venv from `requirements-gnc.txt` |
 | SMACH | `ros-jazzy-smach` 3.0.3 (the ROS 2 port of `executive_smach`); `smach_ros` optional, for the introspection viewer |
 | PX4 link | uXRCE-DDS, `/fmu/in/*` and `/fmu/out/*`, `px4_msgs` on `release/1.16` |
@@ -235,7 +235,7 @@ All fifteen SMACH states live in one file, `mission_manager_smach.py`, with no r
 
 ```
 ~/dev/ros2_ws/src/
-    avc_msgs -> avc-comms-ws/src/avc_msgs   (comms-owned, pinned at 375598d, never edited)
+    avc_msgs -> avc-comms-ws/src/avc_msgs   (comms-owned, pinned at 366e2ba, never edited)
     avc_interfaces/msg/  ColorCheck.msg  TargetDetection.msg  (+ Perception's dice map message)
     gnc_offboard/
 
@@ -341,7 +341,7 @@ Record each run with `ros2 bag record` so `/mission/state` gives a replayable ti
 
 One milestone per PR. Each ends with `colcon build` clean and all tests green.
 
-1. **Comms messages and interfaces.** Clone `avc-comms-ws` into the `gnc` account at commit `375598d`, link `avc_msgs` into the workspace, add `ColorCheck.msg` and the dice map placeholder to `avc_interfaces`. Run `colcon test` and send the results to Abhi (he has no `rclpy` to test with).
+1. **Comms messages and interfaces.** Clone `avc-comms-ws` into the `gnc` account at commit `366e2ba`, link `avc_msgs` into the workspace, add `ColorCheck.msg` and the dice map placeholder to `avc_interfaces`. Run `colcon test` and send the results to Abhi (he has no `rclpy` to test with).
 2. **Core, no ROS.** `context.py`, `io.py`, `checks.py`, `qos.py`, `state_msg.py` and their tests.
 3. **Retire mission\_demo; flight phases.** Lift the PX4 code from `mission_demo.py` into `px4_interface.py`, then remove `mission_demo` from `setup.py` and delete it. Build STANDBY → PREFLIGHT → TAKEOFF → hover → LANDING → RETURN\_CONFIRMED, plus ABORTED and the global checks. Fly it in SITL with `ros2 run gnc_offboard mission_manager`. Check every comms topic with `ros2 topic info -v` against comms' node.
 4. **Intents and pause.** Intent handling, the three rejections, PAUSED and the resume rule, on the flight phases first.
