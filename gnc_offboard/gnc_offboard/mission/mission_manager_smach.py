@@ -309,27 +309,39 @@ class MissionStateBase(smach.State):
 
     # ---- targets, dice map and field frame ------------------------------------------------------
     def set_target(self, color: str) -> None:
-        """New target color: forget the old die and the dice given up on (they were the old
-        color). The coverage memory stays: searched ground is still searched."""
+        """New target color: forget the old die and every excluded die (they were judged
+        against the old color). The coverage memory stays: searched ground is still searched."""
         with self.ctx.lock:
             self.ctx.active_target = color
             self.ctx.target_centroid = None
+            self.ctx.wrong_color_dice = []
             self.forget_failures()
 
     def forget_failures(self) -> None:
-        """Clear the given-up dice and the failure counts (new target, coverage reset)."""
+        """Clear the lost / never-confirmed failure counts and their exclusions (new target, or
+        a coverage reset: worth retrying once the whole field has been searched). Dice with a
+        confirmed wrong color stay excluded."""
         self.ctx.given_up_dice = []
         self.ctx.die_failures = []
 
     def find_target(self, snap, near=None):
-        """The active target in Perception's dice map, skipping dice given up on.
+        """The active target in Perception's dice map, skipping excluded dice (confirmed
+        wrong color, or lost / never confirmed max_die_attempts times).
         TEMPORARY (Milestone 9): every position fits the intent (no region checks yet)."""
         return find_die(_msg(snap.dice_map), self.ctx.active_target, near=near,
-                        exclude=self.ctx.given_up_dice,
+                        exclude=self.ctx.wrong_color_dice + self.ctx.given_up_dice,
                         exclude_radius_m=self.cfg.die_match_radius_m)
 
+    def wrong_color(self, point) -> None:
+        """Perception confirmed this die's color is wrong: exclude it until the target color
+        changes (a coverage reset does not bring it back)."""
+        if point is not None:
+            with self.ctx.lock:
+                self.ctx.wrong_color_dice.append(tuple(point))
+                self.ctx.target_centroid = None
+
     def give_up(self, point) -> None:
-        """Exclude this die from now on (Perception confirmed its wrong color)."""
+        """Lost / never confirmed max_die_attempts times: exclude it until a coverage reset."""
         if point is not None:
             with self.ctx.lock:
                 self.ctx.given_up_dice.append(tuple(point))
@@ -708,7 +720,7 @@ class Approaching(MissionStateBase):
         color = confirmed_color(cc) if cc is not None and cc.rx_time >= self.arrived_at else None
         result = check_color(color, self.ctx.active_target)
         if result is ColorResult.WRONG:
-            self.give_up(self.goal)
+            self.wrong_color(self.goal)
             other = self.find_target(snap, near=self.goal[:2])
             if other is not None:
                 return self.finish('wrong_color_known', f'wrong color ({color}): going to target')
@@ -793,7 +805,7 @@ class Descending(MissionStateBase):
         cc = snap.color_check
         if cc is not None and cc.rx_time >= self.entered_at:
             if check_color(confirmed_color(cc), self.ctx.active_target) is ColorResult.WRONG:
-                self.give_up(self.die)
+                self.wrong_color(self.die)
                 return self.finish('failed', f'wrong color ({confirmed_color(cc)}) on descent')
 
         if self.phase == 'climb':                       # retry: back up to hover height

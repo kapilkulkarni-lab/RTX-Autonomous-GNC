@@ -89,7 +89,7 @@ def test_wrong_color_first_then_the_real_target(ctx, io, cfg, clock, fake_px4, f
     wrong = [t for t in lines(io) if 'wrong color' in t]
     assert len(wrong) == 1 and wrong[0].startswith('APPROACHING -> ')
     assert near(ctx.target_centroid, RED, 0.05)
-    assert len(ctx.given_up_dice) == 1 and not near(ctx.given_up_dice[0], RED)
+    assert len(ctx.wrong_color_dice) == 1 and not near(ctx.wrong_color_dice[0], RED)
 
 
 def test_wrong_color_known_goes_straight_to_the_target(ctx, io, cfg, clock, fake_px4,
@@ -227,7 +227,7 @@ def test_wrong_color_excluded_at_once(ctx, io, cfg, clock, fake_px4, fake_percep
     """A wrong color Perception confirmed is never retried, whatever max_die_attempts is."""
     flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'red', wrong_color_first='red')
     assert run_to_end(ctx, io, cfg, clock) == MISSION_COMPLETE
-    assert len(ctx.given_up_dice) == 1 and ctx.die_failures == []
+    assert len(ctx.wrong_color_dice) == 1 and ctx.given_up_dice == [] and ctx.die_failures == []
 
 
 def test_searching_skips_dice_given_up_on(ctx, io, cfg, clock, feed):
@@ -249,9 +249,31 @@ def test_searching_field_covered_clears_and_searches_again(ctx, io, cfg, clock, 
     ctx.coverage.mark([[-10, -10], [10, -10], [10, 10], [-10, 10]])
     ctx.given_up_dice = [(1.0, 1.0, 0.0)]
     ctx.die_failures = [[(2.0, 2.0, 0.0), 1]]
+    ctx.wrong_color_dice = [(3.0, 3.0, 0.0)]
     state = make(Searching, ctx, io, cfg, clock)
     assert ctx.reason == 'target not found, searching again'
     assert ctx.given_up_dice == [] and ctx.die_failures == [] and state.follower is not None
+    assert ctx.wrong_color_dice == [(3.0, 3.0, 0.0)]       # a wrong color stays excluded
+
+
+def test_wrong_color_die_stays_excluded_after_a_coverage_reset(ctx, io, cfg, clock, feed):
+    airborne(ctx, feed, clock, dice=[('red', RED)])      # Perception still says red, but
+    ctx.wrong_color_dice = [(*RED, 0.0)]                   # a close look said otherwise
+    ctx.given_up_dice = [(9.0, 9.0, 0.0)]
+    ctx.coverage.mark([[-10, -10], [10, -10], [10, 10], [-10, 10]])
+    state = make(Searching, ctx, io, cfg, clock)          # coverage reset on entry
+    assert ctx.given_up_dice == [] and ctx.coverage.count < 10
+    assert state.tick(clock.now()) is None                 # not target_known: still excluded
+
+
+def test_lost_die_comes_back_after_a_coverage_reset(ctx, io, cfg, clock, feed):
+    airborne(ctx, feed, clock, dice=[('red', RED)])
+    ctx.given_up_dice = [(*RED, 0.0)]
+    ctx.die_failures = [[(*RED, 0.0), cfg.max_die_attempts]]
+    ctx.coverage.mark([[-10, -10], [10, -10], [10, 10], [-10, 10]])
+    # The entry check runs before the reset; the first loop after it finds the die again.
+    assert make(Searching, ctx, io, cfg, clock).tick(clock.now()) == 'target_found'
+    assert ctx.given_up_dice == [] and ctx.die_failures == []
     assert 'request_state_publish' in io.names()
 
 
@@ -320,11 +342,13 @@ def test_retarget_from_every_flying_state(cls, color, outcome, ctx, io, cfg, clo
     airborne(ctx, feed, clock, dice=[('black', BLACK)])
     ctx.given_up_dice, ctx.target_centroid = [(9.0, 9.0, 0.0)], (1.0, 1.0, 0.0)
     ctx.die_failures = [[(8.0, 8.0, 0.0), 1]]
+    ctx.wrong_color_dice = [(7.0, 7.0, 0.0)]
     state = make(cls, ctx, io, cfg, clock)
     ctx.update_input('intent', intent('retrieve', color, 5), clock.now())
     assert state.tick(clock.now()) == outcome
     assert ctx.active_target == color and ctx.last_intent_result == 'applied'
     assert ctx.given_up_dice == [] and ctx.die_failures == [] and ctx.target_centroid is None
+    assert ctx.wrong_color_dice == []                     # a new color clears every exclusion
 
 
 def test_retarget_wiring():

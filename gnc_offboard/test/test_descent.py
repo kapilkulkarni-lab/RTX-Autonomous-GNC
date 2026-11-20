@@ -141,8 +141,8 @@ def test_wrong_color_on_descent_excludes_the_die(ctx, io, cfg, clock, fake_px4, 
             injected.append(now)
             ctx.update_input('color_check', SimpleNamespace(color_guess='blue', confidence=1.0),
                              now)
-        if ctx.given_up_dice and not excluded:
-            excluded.append(list(ctx.given_up_dice))
+        if ctx.wrong_color_dice and not excluded:
+            excluded.append(list(ctx.wrong_color_dice))
     clock.hooks.append(wrong_once)
     run_to_end(ctx, io, cfg, clock)
     assert 'DESCENDING -> APPROACHING: wrong color (blue) on descent' in lines(io)

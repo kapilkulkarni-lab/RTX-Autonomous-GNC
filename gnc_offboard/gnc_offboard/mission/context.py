@@ -92,7 +92,10 @@ class MissionContext:
     touchdowns: int = 0                      # touchdowns on a die this mission
     coverage_pose: Optional[Any] = None      # (position, q) of the odometry last marked
     target_centroid: Optional[Any] = None    # field x, y, z of the target die once known
-    given_up_dice: List[Any] = field(default_factory=list)  # field points excluded from the search
+    wrong_color_dice: List[Any] = field(default_factory=list)  # confirmed wrong color: excluded
+                                                               # until the target color changes
+    given_up_dice: List[Any] = field(default_factory=list)  # lost / never confirmed too often:
+                                                            # excluded until a coverage reset
     die_failures: List[Any] = field(default_factory=list)   # [point, count]: lost / never confirmed
 
     # State bookkeeping (state names come from state_names.py).
