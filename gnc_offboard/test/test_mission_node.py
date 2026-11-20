@@ -34,6 +34,10 @@ def test_config_rejects_missing_unknown_and_bad_bool():
         MissionConfig.from_dict({**params, 'surprise': 1})
     with pytest.raises(ValueError, match='require_pilot_arm'):
         MissionConfig.from_dict({**params, 'require_pilot_arm': 'no'})
+    for bad in (0, 1.5, True):
+        with pytest.raises(ValueError, match='max_die_attempts'):
+            MissionConfig.from_dict({**params, 'max_die_attempts': bad})
+    assert MissionConfig.from_dict({**params, 'max_die_attempts': 3}).max_die_attempts == 3
 
 
 @pytest.fixture

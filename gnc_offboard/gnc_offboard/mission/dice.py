@@ -1,7 +1,8 @@
 """Reading Perception's dice map (avc_interfaces/DiceMap, placeholder) and obstacle list.
 Pure: messages are read through duck typing. GNC keeps no die memory of its own; the only
-local state is the list of dice the mission gave up on (wrong color, lost), so it does not
-fly straight back to them.
+local state is which dice the mission gave up on, so it does not fly straight back to them:
+a die whose wrong color Perception confirmed is excluded at once; a die that was lost or
+never confirmed is excluded only after max_die_attempts such failures (count_failure).
 """
 import math
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -43,6 +44,19 @@ def find_die(dice_map_msg, color: str, near: Optional[Sequence[float]] = None,
         if d < best_d:
             best, best_d = point, d
     return best
+
+
+def count_failure(failures: List[list], point: Sequence[float], radius_m: float) -> int:
+    """Record one failed approach (lost / never confirmed) at `point` and return that die's
+    failure count. `failures` is a list of [point, count]; points within `radius_m` are the
+    same die (the first match keeps its original point)."""
+    for entry in failures:
+        p = entry[0]
+        if math.hypot(p[0] - point[0], p[1] - point[1]) <= radius_m:
+            entry[1] += 1
+            return entry[1]
+    failures.append([tuple(point), 1])
+    return 1
 
 
 def obstacles_of(obstacle_msg) -> List[Tuple[float, float, float]]:

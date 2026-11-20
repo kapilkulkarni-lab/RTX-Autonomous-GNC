@@ -26,7 +26,7 @@ from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.checks import (ColorResult, check_color, confirmed_color, invalid_for,
                                          is_centered, is_stale)
 from gnc_offboard.mission.coverage import CoverageMap
-from gnc_offboard.mission.dice import find_die, obstacles_of
+from gnc_offboard.mission.dice import count_failure, find_die, obstacles_of
 from gnc_offboard.mission.search import plan_search
 from gnc_offboard.mission.config import MissionConfig
 from gnc_offboard.mission.context import MissionContext, Stamped
@@ -286,7 +286,12 @@ class MissionStateBase(smach.State):
         with self.ctx.lock:
             self.ctx.active_target = color
             self.ctx.target_centroid = None
-            self.ctx.given_up_dice = []
+            self.forget_failures()
+
+    def forget_failures(self) -> None:
+        """Clear the given-up dice and the failure counts (new target, coverage reset)."""
+        self.ctx.given_up_dice = []
+        self.ctx.die_failures = []
 
     def find_target(self, snap, near=None):
         """The active target in Perception's dice map, skipping dice given up on.
@@ -296,10 +301,23 @@ class MissionStateBase(smach.State):
                         exclude_radius_m=self.cfg.die_match_radius_m)
 
     def give_up(self, point) -> None:
+        """Exclude this die from now on (Perception confirmed its wrong color)."""
         if point is not None:
             with self.ctx.lock:
                 self.ctx.given_up_dice.append(tuple(point))
                 self.ctx.target_centroid = None
+
+    def failed_attempt(self, point) -> int:
+        """A lost / never-confirmed approach: count it; exclude the die only after
+        max_die_attempts. Returns the die's failure count."""
+        if point is None:
+            return 0
+        with self.ctx.lock:
+            count = count_failure(self.ctx.die_failures, point, self.cfg.die_match_radius_m)
+            self.ctx.target_centroid = None
+        if count >= self.cfg.max_die_attempts:
+            self.give_up(point)
+        return count
 
     def field_xyz(self, lp):
         """PX4 NED position -> field (x, y, z); z is height above the PX4 origin."""
@@ -529,7 +547,7 @@ class Searching(MissionStateBase):
                 return
             with self.ctx.lock:
                 self.ctx.coverage.clear()
-                self.ctx.given_up_dice = []
+                self.forget_failures()
                 self.ctx.reason = 'target not found, searching again'
             self.io.request_state_publish()
             return self.plan(snap, restarted=True)
@@ -623,8 +641,8 @@ class Approaching(MissionStateBase):
             self.io.set_setpoint(n, e, d, self.yaw)          # center over the die
             centered = is_centered(dx, dy, cfg.approach_center_tol_m)
         if now - (self.last_seen or self.arrived_at) > cfg.target_lost_s:
-            self.give_up(self.goal)
-            return self.finish('lost', 'target lost')
+            n = self.failed_attempt(self.goal)
+            return self.finish('lost', f'target lost ({n} of {cfg.max_die_attempts})')
 
         cc = snap.color_check          # only colors confirmed since arriving over this die
         color = confirmed_color(cc) if cc is not None and cc.rx_time >= self.arrived_at else None
@@ -637,8 +655,8 @@ class Approaching(MissionStateBase):
             return self.finish('wrong_color_unknown', f'wrong color ({color}): searching')
         if result is ColorResult.PENDING:
             if now - self.arrived_at > cfg.color_confirm_timeout_s:
-                self.give_up(self.goal)
-                return self.finish('lost', 'no confirmed color')
+                n = self.failed_attempt(self.goal)
+                return self.finish('lost', f'no confirmed color ({n} of {cfg.max_die_attempts})')
             return None
         at_height = abs(self.altitude(lp) - cfg.hover_height_m) <= cfg.altitude_tol_m
         if fresh and centered and at_height:

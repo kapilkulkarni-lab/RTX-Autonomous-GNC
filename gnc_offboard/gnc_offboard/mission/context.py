@@ -86,7 +86,8 @@ class MissionContext:
     field_config: Any = None                 # field.FieldConfig
     coverage: Any = None                     # coverage.CoverageMap: ground already searched
     target_centroid: Optional[Any] = None    # field x, y, z of the target die once known
-    given_up_dice: List[Any] = field(default_factory=list)  # field points: wrong color or lost
+    given_up_dice: List[Any] = field(default_factory=list)  # field points excluded from the search
+    die_failures: List[Any] = field(default_factory=list)   # [point, count]: lost / never confirmed
 
     # State bookkeeping (state names come from state_names.py).
     state: str = ''

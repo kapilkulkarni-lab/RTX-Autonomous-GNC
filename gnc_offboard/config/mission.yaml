@@ -59,6 +59,7 @@ mission_manager:
     color_confirm_timeout_s: 5.0  # TBD: no confirmed color this long after arriving -> lost
     approach_center_tol_m: 0.10   # TBD: centered over the die within this
     die_match_radius_m: 0.3       # TBD: dice-map entries this close are the same die
+    max_die_attempts: 2           # TBD: a die lost / never confirmed this many times is skipped
 
     # TARGET_HOVER (TEMPORARY, Milestone 5 only; replaced by DESCENDING in Milestone 6)
     target_hover_s: 5.0

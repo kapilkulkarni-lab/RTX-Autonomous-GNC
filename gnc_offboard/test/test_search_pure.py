@@ -10,7 +10,7 @@ from conftest import TEST_MANIFEST
 from gnc_offboard import search_planners as sp
 from gnc_offboard.guidance.path_follower import PathFollower
 from gnc_offboard.mission.coverage import CoverageMap
-from gnc_offboard.mission.dice import dice_of, find_die, obstacles_of
+from gnc_offboard.mission.dice import count_failure, dice_of, find_die, obstacles_of
 from gnc_offboard.mission.field import FieldConfig
 from gnc_offboard.mission.search import PATTERNS, area_covered, plan_search
 from gnc_offboard.sim.perception_model import Die, PerceptionModel, square_view
@@ -135,6 +135,14 @@ def test_find_die_nearest_and_excluded():
         (4.0, 0.0, 0.0)
     assert find_die(m, 'black') is None and find_die(m, '') is None and find_die(None, 'red') is None
     assert find_die(m, 'red', fits=lambda p: p[0] > 2) == (4.0, 0.0, 0.0)
+
+
+def test_count_failure_per_die():
+    failures = []
+    assert count_failure(failures, (2.0, 2.0, 0.0), 0.3) == 1
+    assert count_failure(failures, (2.1, 2.1, 0.0), 0.3) == 2     # same die, moved a little
+    assert count_failure(failures, (-4.0, 1.0, 0.0), 0.3) == 1    # another die
+    assert failures == [[(2.0, 2.0, 0.0), 2], [(-4.0, 1.0, 0.0), 1]]
 
 
 def test_obstacles_of():

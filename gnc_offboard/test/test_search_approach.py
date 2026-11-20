@@ -104,15 +104,21 @@ def test_wrong_color_known_goes_straight_to_the_target(ctx, io, cfg, clock, fake
     assert near(ctx.target_centroid, (3.0, 3.0), 0.05)
 
 
-def test_target_lost_goes_back_to_searching(ctx, io, cfg, clock, fake_px4, fake_perception,
-                                            script):
+def test_target_lost_retried_until_max_attempts(ctx, io, cfg, clock, fake_px4, fake_perception,
+                                                script):
+    """Lost once: the die stays eligible, so SEARCHING's entry check sends the drone back.
+    Lost max_die_attempts (2) times: skipped."""
     px4, perception = flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'red')
     script.when(lambda c: c.state == S.APPROACHING, None,
                 then=lambda: setattr(perception, 'drop', True))
     script.when(lambda c: c.state == S.SEARCHING and c.given_up_dice, intent('abort', '', 2))
     assert run_to_end(ctx, io, cfg, clock) == MISSION_ABORTED
-    assert 'APPROACHING -> SEARCHING: target lost' in lines(io)
-    assert near(ctx.given_up_dice[0], RED)
+    out = [t for t in lines(io) if t.startswith(('APPROACHING -> ', 'SEARCHING -> APPROACHING'))]
+    assert out == ['SEARCHING -> APPROACHING: red found',
+                   'APPROACHING -> SEARCHING: target lost (1 of 2)',
+                   'SEARCHING -> APPROACHING: red already in the dice map',
+                   'APPROACHING -> SEARCHING: target lost (2 of 2)']
+    assert len(ctx.given_up_dice) == 1 and near(ctx.given_up_dice[0], RED)
 
 
 def test_color_never_confirmed_times_out(ctx, io, cfg, clock, fake_px4, fake_perception, script):
@@ -122,7 +128,9 @@ def test_color_never_confirmed_times_out(ctx, io, cfg, clock, fake_px4, fake_per
     script.when(lambda c: c.state == S.SEARCHING and c.given_up_dice, intent('abort', '', 2))
     assert run_to_end(ctx, io, cfg, clock) == MISSION_ABORTED
     left = [t for t in lines(io) if t.startswith('APPROACHING -> ')]
-    assert left == ['APPROACHING -> SEARCHING: no confirmed color']
+    assert left == ['APPROACHING -> SEARCHING: no confirmed color (1 of 2)',
+                    'APPROACHING -> SEARCHING: no confirmed color (2 of 2)']
+    assert near(ctx.given_up_dice[0], RED)
 
 
 def test_retarget_mid_search_unseen(ctx, io, cfg, clock, fake_px4, fake_perception, script):
@@ -195,6 +203,31 @@ def test_searching_entry_check_target_known(ctx, io, cfg, clock, feed):
     assert 'set_setpoint' not in io.names()             # leaves at once, flies nothing
 
 
+def test_die_lost_fewer_than_max_attempts_stays_eligible(ctx, io, cfg, clock, feed):
+    airborne(ctx, feed, clock, dice=[('red', RED)])
+    ctx.die_failures = [[(*RED, 0.0), cfg.max_die_attempts - 1]]
+    assert make(Searching, ctx, io, cfg, clock).tick(clock.now()) == 'target_known'
+
+
+def test_max_die_attempts_one_skips_after_first_loss(ctx, io, make_cfg, clock, fake_px4,
+                                                     fake_perception, script):
+    cfg = make_cfg(max_die_attempts=1)
+    px4, perception = flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'red')
+    script.when(lambda c: c.state == S.APPROACHING, None,
+                then=lambda: setattr(perception, 'drop', True))
+    script.when(lambda c: c.state == S.SEARCHING and c.given_up_dice, intent('abort', '', 2))
+    assert run_to_end(ctx, io, cfg, clock) == MISSION_ABORTED
+    assert [t for t in lines(io) if t.startswith('APPROACHING -> ')] == [
+        'APPROACHING -> SEARCHING: target lost (1 of 1)']
+
+
+def test_wrong_color_excluded_at_once(ctx, io, cfg, clock, fake_px4, fake_perception):
+    """A wrong color Perception confirmed is never retried, whatever max_die_attempts is."""
+    flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'red', wrong_color_first='red')
+    assert run_to_end(ctx, io, cfg, clock) == MISSION_COMPLETE
+    assert len(ctx.given_up_dice) == 1 and ctx.die_failures == []
+
+
 def test_searching_skips_dice_given_up_on(ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock, dice=[('red', RED)])
     ctx.given_up_dice = [RED]
@@ -213,9 +246,10 @@ def test_searching_field_covered_clears_and_searches_again(ctx, io, cfg, clock, 
     airborne(ctx, feed, clock)
     ctx.coverage.mark(0.0, 0.0, 20.0)
     ctx.given_up_dice = [(1.0, 1.0, 0.0)]
+    ctx.die_failures = [[(2.0, 2.0, 0.0), 1]]
     state = make(Searching, ctx, io, cfg, clock)
     assert ctx.reason == 'target not found, searching again'
-    assert ctx.given_up_dice == [] and state.follower is not None
+    assert ctx.given_up_dice == [] and ctx.die_failures == [] and state.follower is not None
     assert 'request_state_publish' in io.names()
 
 
@@ -262,11 +296,12 @@ def test_approaching_routes_around_obstacles(ctx, io, cfg, clock, feed):
 def test_retarget_from_every_flying_state(cls, color, outcome, ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock, dice=[('black', BLACK)])
     ctx.given_up_dice, ctx.target_centroid = [(9.0, 9.0, 0.0)], (1.0, 1.0, 0.0)
+    ctx.die_failures = [[(8.0, 8.0, 0.0), 1]]
     state = make(cls, ctx, io, cfg, clock)
     ctx.update_input('intent', intent('retrieve', color, 5), clock.now())
     assert state.tick(clock.now()) == outcome
     assert ctx.active_target == color and ctx.last_intent_result == 'applied'
-    assert ctx.given_up_dice == [] and ctx.target_centroid is None
+    assert ctx.given_up_dice == [] and ctx.die_failures == [] and ctx.target_centroid is None
 
 
 def test_retarget_wiring():

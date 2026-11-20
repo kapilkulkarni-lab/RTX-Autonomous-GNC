@@ -45,6 +45,7 @@ class MissionConfig:
     color_confirm_timeout_s: float
     approach_center_tol_m: float
     die_match_radius_m: float
+    max_die_attempts: int
     target_hover_s: float             # TEMPORARY (Milestone 5; DESCENDING in Milestone 6)
 
     @classmethod
@@ -66,6 +67,10 @@ class MissionConfig:
                 typed[f.name] = v
             elif f.type is str:
                 typed[f.name] = str(v)
+            elif f.type is int:
+                if isinstance(v, bool) or int(v) != v or int(v) < 1:
+                    raise ValueError(f'{f.name} must be a whole number >= 1, got {v!r}')
+                typed[f.name] = int(v)
             else:
                 typed[f.name] = float(v)
         from gnc_offboard.mission.search import PATTERNS
