@@ -91,6 +91,7 @@ class MissionContext:
     blind_height_m: Optional[float] = None   # the down camera's blind height (cameras.yaml)
     touchdowns: int = 0                      # touchdowns on a die this mission
     coverage_pose: Optional[Any] = None      # (position, q) of the odometry last marked
+    yaw_cmd: Optional[Any] = None            # guidance.yaw.YawCommand: the commanded yaw
     target_centroid: Optional[Any] = None    # field x, y, z of the target die once known
     wrong_color_dice: List[Any] = field(default_factory=list)  # confirmed wrong color: excluded
                                                                # until the target color changes

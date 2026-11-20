@@ -55,6 +55,11 @@ mission_manager:
     cruise_speed_mps: 1.0         # TBD: peak speed per leg
     max_accel_mps2: 0.5           # TBD
     acceptance_radius_m: 0.25     # waypoint reached within this
+    # Yaw: face the field center (the D455 looks forward) in TAKEOFF, SEARCHING, APPROACHING's
+    # transit, LIFTOFF and RETURNING; hold the yaw over the die, DESCENDING, on the die, LANDING.
+    face_center: true
+    face_center_deadband_m: 1.0   # this close to the center: hold the last yaw
+    face_center_max_rate_dps: 45.0  # TBD: yaw rate limit
 
     # APPROACHING
     hover_height_m: 1.0           # TBD: height above the start position over the die

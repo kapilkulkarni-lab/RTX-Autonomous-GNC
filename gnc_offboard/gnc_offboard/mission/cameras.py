@@ -82,6 +82,18 @@ def yaw_quaternion(yaw_ned: float):
     return (math.cos(yaw_ned / 2.0), 0.0, 0.0, math.sin(yaw_ned / 2.0))
 
 
+def down_footprint_min_width(cameras: Dict[str, CameraModel], altitude_m: float,
+                             rows_along: str = 'x', step_deg: float = 1.0) -> float:
+    """The down camera's narrowest footprint width across the rows over every heading the
+    drone may hold (it yaws to face the field center), at `altitude_m`. Row spacing from this
+    leaves no gaps whatever the yaw."""
+    widths = []
+    for k in range(int(round(360.0 / step_deg))):
+        wx, wy = down_footprint_extent(cameras, altitude_m, math.radians(k * step_deg))
+        widths.append(wy if rows_along == 'x' else wx)
+    return min(widths)
+
+
 def down_footprint_extent(cameras: Dict[str, CameraModel], altitude_m: float,
                           yaw_ned: float):
     """(width along field x, width along field y) of the down camera's footprint when level at

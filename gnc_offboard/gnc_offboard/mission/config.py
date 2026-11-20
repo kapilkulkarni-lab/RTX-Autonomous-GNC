@@ -42,6 +42,9 @@ class MissionConfig:
     cruise_speed_mps: float
     max_accel_mps2: float
     acceptance_radius_m: float
+    face_center: bool
+    face_center_deadband_m: float
+    face_center_max_rate_dps: float
     hover_height_m: float
     target_lost_s: float
     color_confirm_timeout_s: float

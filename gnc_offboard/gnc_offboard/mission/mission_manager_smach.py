@@ -23,12 +23,13 @@ from avc_msgs.msg import MissionState
 from gnc_offboard import search_planners as sp
 from gnc_offboard.guidance import px4_interface as px4
 from gnc_offboard.guidance.path_follower import PathFollower
+from gnc_offboard.guidance.yaw import YawCommand, field_center
 from gnc_offboard.mission import intents as I
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.checks import (ColorResult, check_color, confirmed_color, invalid_for,
                                          is_centered, is_stale)
 from gnc_offboard.camera_model import CoverageGrid
-from gnc_offboard.mission.cameras import (down_footprint_extent, footprints, load_blind_height,
+from gnc_offboard.mission.cameras import (down_footprint_min_width, footprints, load_blind_height,
                                           load_cameras)
 from gnc_offboard.mission.checks import touchdown_confirmed, update_below_since
 from gnc_offboard.mission.dice import count_failure, find_die, obstacles_of
@@ -380,6 +381,31 @@ class MissionStateBase(smach.State):
         start_z = self.ctx.start_position[2] if self.ctx.start_position else 0.0
         return (n, e, start_z - height)
 
+    # ---- yaw ------------------------------------------------------------------------------------
+    def _yaw_cmd(self, now, lp=None) -> YawCommand:
+        if self.ctx.yaw_cmd is None:
+            if self.ctx.start_position is not None:
+                yaw = self.ctx.start_position[3]
+            else:
+                yaw = lp.heading if px4.position_valid(lp) else 0.0
+            self.ctx.yaw_cmd = YawCommand(yaw, now)
+        return self.ctx.yaw_cmd
+
+    def facing_yaw(self, lp, now) -> float:
+        """Point the nose (D455) at the field center (face_center), rate-limited, holding the
+        last yaw inside face_center_deadband_m. face_center off: hold."""
+        cmd = self._yaw_cmd(now, lp)
+        if not self.cfg.face_center or not px4.position_valid(lp):
+            return cmd.hold(now)
+        x, y, _ = self.field_xyz(lp)
+        return cmd.face(now, (x, y), field_center(self.ctx.field_config.bounds),
+                        self.cfg.face_center_deadband_m,
+                        math.radians(self.cfg.face_center_max_rate_dps))
+
+    def held_yaw(self, now, lp=None) -> float:
+        """Keep the current yaw: over the die, DESCENDING, on the die (precision: no rotating)."""
+        return self._yaw_cmd(now, lp).hold(now)
+
     def range_m(self, snap, now) -> Optional[float]:
         """Rangefinder distance to what is below (m), or None if there is no valid reading.
         rangefinder_source: distance_sensor (px4_msgs/DistanceSensor) or dist_bottom
@@ -543,6 +569,7 @@ class Preflight(MissionStateBase):
                 return None
             # Start position in PX4 local NED and in the field frame.
             self.ctx.start_position = (p.x, p.y, p.z, p.heading)
+            self.ctx.yaw_cmd = YawCommand(p.heading, now)
             if self.ctx.field_config is not None:
                 self.ctx.start_field = self.field_xyz(p)
 
@@ -569,12 +596,14 @@ class Takeoff(MissionStateBase):
     GLOBALS = FLYING_GLOBALS
 
     def on_entry(self, snap, now):
-        x, y, z, yaw = self.ctx.start_position
+        x, y, z, _ = self.ctx.start_position
+        self.xy = (x, y)
         self.target_z = z - self.cfg.search_altitude_m          # NED: up is negative z
-        self.io.set_setpoint(x, y, self.target_z, yaw)
+        self.io.set_setpoint(x, y, self.target_z, self.held_yaw(now))
 
     def step(self, snap, now):
         lp = _msg(snap.local_position)
+        self.io.set_setpoint(*self.xy, self.target_z, self.facing_yaw(lp, now))
         if px4.position_valid(lp) and abs(lp.z - self.target_z) <= self.cfg.altitude_tol_m:
             return self.finish('at_altitude', f'at {self.cfg.search_altitude_m:.1f} m')
         return None
@@ -604,12 +633,12 @@ class Searching(MissionStateBase):
         x, y, _ = self.field_xyz(lp)
         alt = cfg.search_altitude_m
         yaw = self.ctx.start_position[3] if self.ctx.start_position else lp.heading
-        # The down camera's footprint at search altitude, at the constant search heading.
-        wx, wy = down_footprint_extent(self.ctx.cameras, alt, yaw)
-        across = wy if cfg.search_rows_along == 'x' else wx
-        spacing = max(across * (1.0 - cfg.search_overlap), cfg.coverage_cell_m)
+        # The down camera's narrowest across-row width over every yaw (the nose turns to face
+        # the field center), so the rows leave no gaps whatever the heading.
+        width = self._min_width(alt, cfg.search_rows_along)
+        spacing = max(width * (1.0 - cfg.search_overlap), cfg.coverage_cell_m)
         path = plan_search(cfg.search_pattern, fc.area(cfg.wall_margin_m), (x, y),
-                           self.ctx.coverage, max(min(wx, wy), cfg.coverage_cell_m), spacing,
+                           self.ctx.coverage, max(width, cfg.coverage_cell_m), spacing,
                            cfg.wall_margin_m, obstacles_of(_msg(snap.obstacles)),
                            cfg.obstacle_clearance_m, rows_along=cfg.search_rows_along)
         if not path:
@@ -639,11 +668,20 @@ class Searching(MissionStateBase):
                 return None
         lp = _msg(snap.local_position)
         position = (lp.x, lp.y, lp.z) if px4.position_valid(lp) else None
-        (n, e, d), yaw = self.follower.update(now, position)
-        self.io.set_setpoint(n, e, d, yaw)
+        (n, e, d), _ = self.follower.update(now, position)
+        self.io.set_setpoint(n, e, d, self.facing_yaw(lp, now))
         if self.follower.done:
             self.plan(snap)
         return None
+
+    _widths = {}
+
+    def _min_width(self, altitude, rows_along):
+        key = (altitude, rows_along, id(self.ctx.cameras))
+        if key not in Searching._widths:
+            Searching._widths[key] = down_footprint_min_width(self.ctx.cameras, altitude,
+                                                              rows_along, step_deg=2.0)
+        return Searching._widths[key]
 
 
 class Approaching(MissionStateBase):
@@ -689,7 +727,10 @@ class Approaching(MissionStateBase):
         if not px4.position_valid(lp):
             return None
         if self.phase == 'transit':
-            (n, e, d), yaw = self.follower.update(now, (lp.x, lp.y, lp.z))
+            final = self.follower.index >= len(self.follower.waypoints) - 1
+            (n, e, d), _ = self.follower.update(now, (lp.x, lp.y, lp.z))
+            # Transit faces the field center; the last leg (straight down over the die) holds.
+            yaw = self.held_yaw(now) if final else self.facing_yaw(lp, now)
             self.io.set_setpoint(n, e, d, yaw)
             if not self.follower.done:
                 return None
@@ -710,7 +751,7 @@ class Approaching(MissionStateBase):
             with self.ctx.lock:
                 self.ctx.target_centroid = die
             n, e, d = self.ned_at_height(die[0], die[1], cfg.hover_height_m)
-            self.io.set_setpoint(n, e, d, self.yaw)          # center over the die
+            self.io.set_setpoint(n, e, d, self.held_yaw(now))   # center over the die
             centered = is_centered(dx, dy, cfg.approach_center_tol_m)
         if now - (self.last_seen or self.arrived_at) > cfg.target_lost_s:
             n = self.failed_attempt(self.goal)
@@ -768,14 +809,13 @@ class Descending(MissionStateBase):
         self.retry_reason = ''
         lp = _msg(snap.local_position)
         self.height = self.altitude(lp) if px4.position_valid(lp) else cfg.hover_height_m
-        self.yaw = self.ctx.start_position[3] if self.ctx.start_position else 0.0
 
     def control_lost(self, status, snap, now):
         return self.landing_control_lost(status, snap, now)
 
     def _setpoint(self, height):
         n, e, d = self.ned_at_height(self.touch[0], self.touch[1], height)
-        self.io.set_setpoint(n, e, d, self.yaw)
+        self.io.set_setpoint(n, e, d, self.held_yaw(self.last_t))
 
     def step(self, snap, now):
         cfg = self.cfg
@@ -900,7 +940,7 @@ class Liftoff(MissionStateBase):
         self.first_cmd_at = self.last_cmd_at = None
         self.stream_since = now
         self.xyz = (lp.x, lp.y, lp.z) if px4.position_valid(lp) else None
-        self.yaw = self.ctx.start_position[3] if self.ctx.start_position else 0.0
+        self.yaw = self.held_yaw(now, lp)                # on the die: hold the yaw
         if self.xyz is not None:
             self.io.set_setpoint(*self.xyz, self.yaw)    # hold here; starts the stream
 
@@ -925,7 +965,8 @@ class Liftoff(MissionStateBase):
             else:
                 return self._rearm(status, now)
         start_z = self.ctx.start_position[2] if self.ctx.start_position else 0.0
-        self.io.set_setpoint(self.xyz[0], self.xyz[1], start_z - cfg.hover_height_m, self.yaw)
+        self.io.set_setpoint(self.xyz[0], self.xyz[1], start_z - cfg.hover_height_m,
+                             self.facing_yaw(lp, now))
         if px4.position_valid(lp) and \
                 abs(self.altitude(lp) - cfg.hover_height_m) <= cfg.altitude_tol_m:
             after = self.ctx.after_liftoff or S.RETURNING
@@ -997,8 +1038,8 @@ class Returning(MissionStateBase):
                 return None
         lp = _msg(snap.local_position)
         position = (lp.x, lp.y, lp.z) if px4.position_valid(lp) else None
-        (n, e, d), yaw = self.follower.update(now, position)
-        self.io.set_setpoint(n, e, d, yaw)
+        (n, e, d), _ = self.follower.update(now, position)
+        self.io.set_setpoint(n, e, d, self.facing_yaw(lp, now))
         if self.follower.done:
             return self.finish('over_start', 'over the start zone')
         return None
