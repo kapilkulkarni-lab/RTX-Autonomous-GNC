@@ -528,6 +528,14 @@ class Paused(MissionStateBase):
         self.ack(intent)                  # already paused: applied, no change
         return None
 
+    def on_return_to_start(self, intent, now):
+        if self.ctx.paused_from == S.LANDING:
+            # Leave the pause and continue LANDING. If PX4 already reports landed, LANDING
+            # just finishes (no land command; disarm, RETURN_CONFIRMED).
+            self.ack(intent)
+            return self.finish(resume_outcome(S.LANDING), 'return to start: landing')
+        return super().on_return_to_start(intent, now)
+
     def on_retrieve(self, intent, now):
         return self._store(intent)
 

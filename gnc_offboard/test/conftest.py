@@ -126,6 +126,7 @@ class FakePx4:
         self.ctx, self.io, self.clock = ctx, io, clock
         self.accept_arm, self.auto_disarm_s, self.climb = accept_arm, auto_disarm_s, climb_mps
         self.accept_offboard = True
+        self.accept_disarm = True
         self.armed, self.nav, self.z, self.landed = False, POSCTL, 0.0, True
         self.landed_at = None
         self.seen = 0
@@ -140,7 +141,7 @@ class FakePx4:
         for name, args in self.io.calls[self.seen:]:
             if name == 'arm' and self.accept_arm:
                 self.armed = True
-            elif name == 'disarm' and self.landed:
+            elif name == 'disarm' and self.landed and self.accept_disarm:
                 self.armed = False
             elif name == 'set_offboard' and self.armed and self.io.setpoint is not None \
                     and self.accept_offboard:

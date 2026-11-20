@@ -57,7 +57,7 @@ Global transitions live in `MissionStateBase`, checked first on every loop, so n
 | Position estimate invalid for TBD s, or Perception heartbeat stale for TBD s | `aborted` (hold, then land in place) | Airborne states |
 | Battery below TBD % | `return` (on the die: LIFTOFF first) | Airborne and on-die states |
 | Mission clock past the force-return threshold | `return` (on the die: LIFTOFF first) | All states before RETURNING |
-| Intent `return_to_start` | `return` (on the die: LIFTOFF first) | Airborne and on-die states, and PREFLIGHT (stop, disarm, RETURN\_CONFIRMED: already in the start zone); in PAUSED, as for `paused_from`. STANDBY: applied, no change |
+| Intent `return_to_start` | `return` (on the die: LIFTOFF first) | Airborne and on-die states, and PREFLIGHT (stop, disarm, RETURN\_CONFIRMED: already in the start zone); in PAUSED, as for `paused_from`, except PAUSED from LANDING, which leaves the pause and continues LANDING. LANDING and STANDBY: applied, no change |
 | Intent `pause` (acts on the action alone) | `pause` | Every state except RETURN\_CONFIRMED and ABORTED |
 | Intent `retrieve` with a new color | `retarget_seen` or `retarget_unseen`; drop the die first if holding one; on the die, LIFTOFF first. In PAUSED: stored, stays paused | TAKEOFF through RETURNING |
 
@@ -166,7 +166,7 @@ Every intent GNC handles sets `last_intent_id` and `last_intent_result` (`applie
 | `retrieve`, same color | No state change; apply region fields |
 | `retrieve`, new color | Retarget (global check). While PAUSED: stored, counts as a new intent |
 | `abort` | Any → ABORTED, including from PAUSED. Acts on the action alone. After RETURN\_CONFIRMED or ABORTED: applied, no change |
-| `return_to_start` | Airborne or on the die → RETURNING, including from PAUSED (as for `paused_from`). PREFLIGHT: stop, disarm, RETURN\_CONFIRMED. STANDBY: applied, no change |
+| `return_to_start` | Airborne or on the die → RETURNING, including from PAUSED (as for `paused_from`). PREFLIGHT: stop, disarm, RETURN\_CONFIRMED. LANDING: applied, no change (already landing). PAUSED from LANDING: applied, leaves the pause and continues LANDING; if PX4 already reports landed, LANDING just finishes (disarm, RETURN\_CONFIRMED). STANDBY: applied, no change |
 | `read_chip` | Go to NFC\_READY only if landed on the target die. **Rejected** otherwise: "read\_chip rejected: not on the die" |
 | `pause` | Any state except the end states → PAUSED. Acts on the action alone. While already PAUSED: applied, no change |
 | `resume` | Leave PAUSED by the resume rule. **Rejected** if not paused: "resume ignored: not paused" |

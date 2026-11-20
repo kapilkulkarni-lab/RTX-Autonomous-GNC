@@ -268,14 +268,50 @@ def test_return_to_start_while_paused_airborne(paused_from, ctx, io, cfg, clock,
     assert Paused(ctx, io, cfg, clock).execute() == RETURN_OUT
 
 
-def test_return_to_start_while_paused_from_landing_no_change(ctx, io, cfg, clock, feed):
-    """Follows paused_from: in LANDING it is applied with no change (already landing in place)."""
+@pytest.mark.parametrize('landed', [False, True])
+def test_return_to_start_while_paused_from_landing_continues_landing(landed, ctx, io, cfg,
+                                                                     clock, feed):
+    """Leaves the pause and continues LANDING (applied), descending or already landed."""
     paused_airborne(ctx, feed, clock, S.LANDING)
+    feed.set(land_detected=land_detected(landed))
     ctx.update_input('intent', msg('return_to_start', intent_id=2), clock.now())
-    clock.limit = clock.now() + 2.0
-    with pytest.raises(TimeoutError):
-        Paused(ctx, io, cfg, clock).execute()
-    assert ctx.last_intent_result == 'applied'
+    assert Paused(ctx, io, cfg, clock).execute() == resume_outcome(S.LANDING)
+    assert (ctx.last_intent_id, ctx.last_intent_result) == (2, 'applied')
+    assert ctx.pending_reason == 'return to start: landing'
+
+
+def test_return_to_start_paused_while_descending_lands(ctx, rio, cfg, clock, fake_px4, script,
+                                                       ids):
+    px4 = fake_px4(rio)
+    ctx.update_input('intent', msg('retrieve', 'blue', 1), clock.now())
+    script.when(lambda c: c.state == S.LANDING and px4.nav == AUTO_LAND and px4.z > -1.0,
+                msg('pause', intent_id=2))
+    script.when(lambda c: c.state == S.PAUSED and px4.nav == OFFBOARD,
+                msg('return_to_start', intent_id=3))
+    assert build_state_machine(ctx, rio, cfg, clock).execute() == MISSION_COMPLETE
+    assert transitions_of(rio)[-4:] == [S.LANDING, S.PAUSED, S.LANDING, S.RETURN_CONFIRMED]
+    assert px4.landed and not px4.armed
+
+
+def test_return_to_start_paused_after_landed_finishes(ctx, rio, cfg, clock, fake_px4, script,
+                                                      ids):
+    """Already landed: resumes LANDING, which disarms and ends in RETURN_CONFIRMED; it never
+    sends land or asks for offboard again."""
+    px4 = fake_px4(rio, auto_disarm_s=1000.0)      # PX4 auto-disarm off: GNC disarms
+    px4.accept_disarm = False                      # still armed on the ground when paused
+    ctx.update_input('intent', msg('retrieve', 'blue', 1), clock.now())
+    marks = {}
+    script.when(lambda c: c.state == S.LANDING and px4.landed and px4.armed,
+                msg('pause', intent_id=2))
+    script.when(lambda c: c.state == S.PAUSED, msg('return_to_start', intent_id=3),
+                then=lambda: (marks.update(calls_at=len(rio.calls)),
+                              setattr(px4, 'accept_disarm', True)))
+    assert build_state_machine(ctx, rio, cfg, clock).execute() == MISSION_COMPLETE
+    assert transitions_of(rio)[-4:] == [S.LANDING, S.PAUSED, S.LANDING, S.RETURN_CONFIRMED]
+    after = [n for n, _ in rio.calls[marks['calls_at']:]]
+    assert 'disarm' in after
+    assert not {'land', 'set_offboard', 'set_setpoint', 'arm'} & set(after)
+    assert px4.landed and not px4.armed and px4.z == 0.0
 
 
 def test_return_to_start_while_paused_from_preflight(ctx, io, cfg, clock, feed):
