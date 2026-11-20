@@ -25,7 +25,8 @@ Rules for the builder:
 | PX4 link | uXRCE-DDS, `/fmu/in/*` and `/fmu/out/*`, `px4_msgs` on `release/1.16` |
 | Target computer | Jetson Orin Nano, `gnc` account, `ROS_DOMAIN_ID=10` |
 | Position source | Qualisys mocap into PX4 EKF2 in the lab; Perception VIO later. GNC reads the fused estimate from PX4 either way |
-| Dice positions | Perception owns the dice map (xyz centroid and color of every die seen). GNC reads it directly and keeps no die memory of its own |
+| Dice positions | Perception owns the dice map (xyz centroid and color of every die seen). GNC reads it directly and keeps no die memory of its own, except the dice it gave up on (wrong color, lost, color never confirmed) so it does not fly straight back to them; that list clears on a new target or when the coverage memory resets |
+| Field frame | ENU, origin at the field center, +x east, +y north, meters. Loaded by `field_file`: the world manifest in sim (follows `start_sim.sh -k`), `config/field.yaml` on hardware (field bounds, start zone, and where PX4's local origin sits in the field frame). PX4 north is assumed to be field +y (see open questions) |
 | Downward camera | One camera pointing straight down. BrainChip confirms die color from it, and it drives the final centering during descent |
 | Main entry point | `mission_manager` is the one script that flies the mission. `mission_demo.py` is retired: lift its arming, offboard handshake and setpoint code into `guidance/px4_interface.py`, then remove `mission_demo` from `setup.py` and delete the file (git history keeps it). Nothing new may import or launch it |
 
@@ -54,7 +55,7 @@ Global transitions live in `MissionStateBase`, checked first on every loop, so n
 | --- | --- | --- |
 | PX4 failsafe, offboard lost, pilot takeover, or PX4 link lost (no `vehicle_status` for `px4_status_stale_s`) | `aborted` (stop sending commands). In LANDING, a disarm with PX4's landed flag (or within `landed_disarm_grace_s` before it) is the normal end of a landing, never an abort | Any state (a failsafe counts once armed or offboard; link lost once airborne) |
 | Intent `abort` (acts on the action alone; other fields may be empty) | `aborted`. On the die: disarm and stay | Any state, including PAUSED |
-| Position estimate invalid for TBD s, or Perception heartbeat stale for TBD s | `aborted` (hold, then land in place) | Airborne states |
+| Position estimate invalid for `pose_invalid_s`, or Perception heartbeat stale for `perception_stale_s` (skipped when `require_perception: false`, for lab flights without Perception; warned at startup) | `aborted` (hold, then land in place) | Airborne states |
 | Battery below TBD % | `return` (on the die: LIFTOFF first) | Airborne and on-die states |
 | Mission clock past the force-return threshold | `return` (on the die: LIFTOFF first) | All states before RETURNING |
 | Intent `return_to_start` | `return` (on the die: LIFTOFF first) | Airborne and on-die states, and PREFLIGHT (stop, disarm, RETURN\_CONFIRMED: already in the start zone); in PAUSED, as for `paused_from`, except PAUSED from LANDING, which leaves the pause and continues LANDING. LANDING and STANDBY: applied, no change |
@@ -72,8 +73,8 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 | 1 | STANDBY | Disarmed, no setpoints | Wait for the first `retrieve` intent with a target color | `start` |
 | 2 | PREFLIGHT | Start the setpoint stream (hold current pose) | Wait for EKF converged and stable for `ekf_stable_s` and the stream running for `offboard_warmup_s`; record start position in the field frame; arm; switch to offboard (commands resent every `cmd_retry_s`). With `require_pilot_arm: true` GNC never sends arm: it waits for the pilot to arm (no timeout), then switches to offboard | `ready`, `failed` |
 | 3 | TAKEOFF | Setpoint = start position at search altitude | Check altitude within tolerance | `at_altitude` |
-| 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise fly the search pattern, skipping ground already covered, and any target quadrant first | Follow pattern; mark covered cells; leave when the dice map reports the active color | `target_known`, `target_found` |
-| 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map | Fly to hover height (TBD) over the centroid; run the color check from the downward camera | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `lost` → SEARCHING (color PENDING keeps waiting) |
+| 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise plan the search pattern (`search_pattern`: `frontier` by default, which starts from the coverage memory so it never re-flies covered ground; `lawnmower` and `zone_sweep` for comparison) at `search_altitude_m`, routing around obstacles, and any target quadrant first | Follow pattern; mark covered cells (detection footprint of `detect_fov_deg`, nadir); leave when the dice map reports the active color. Whole field covered without the target: clear the coverage memory and search again (`reason`: "target not found, searching again") | `target_known`, `target_found` |
+| 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map, at `search_altitude_m`, then straight down to `hover_height_m` | Center over the die on `/perception/target_relative` (within `approach_center_tol_m`); run the color check from the downward camera, using only colors confirmed since arriving | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `lost` → SEARCHING (color PENDING keeps waiting). `lost`: no `target_relative` for `target_lost_s`, or no confirmed color `color_confirm_timeout_s` after arriving |
 | 6 | DESCENDING | Lock the touchdown point to the centroid's x/y | Descend in stages at TBD m/s; at each stage re-center on Perception's target-relative position and only continue while the sideways error is under that stage's tolerance; re-check color while the die is in view; below the camera blind height finish on the last good centering plus rangefinder and EKF; confirm touchdown from the rangefinder, not only PX4's land detector | `touchdown`, `retry` (error too large or die lost: climb to hover height and try again), `failed` (retries used) → APPROACHING |
 | 7 | NFC\_READY | On the die. Motor stage 1: stay armed at idle (minimum throttle). Stage 2: disarm. Send `/hw/nfc/command` start | Wait for NFC status `reading` | `read_started`, `timeout` |
 | 8 | READING | Stay landed in the current motor stage | Wait for `/hw/nfc/result`; publish it on `/mission/nfc_result` with a new `read_id`; then wait until `/llm/heartbeat` echoes that `read_id` (`read_complete()`). The hardware result (`NfcResult.success`) decides success or failure. No timeout (global checks still apply) | `success_retrieve`, `success_return`, `failed_retry` (same stage), `failed_motors_off` (stage 1 used up → disarm, NFC\_READY), `failed_redescend` (stage 2 used up, first time → LIFTOFF then DESCENDING), `failed_hold` |
@@ -100,11 +101,9 @@ Each is marked TEMPORARY in the code and removed by the milestone named.
 
 | Stand-in | Behavior now | Replaced in |
 | --- | --- | --- |
-| HOVER\_TEST state | After TAKEOFF: hover `hover_test_s`, then LANDING in place. Published as "HOVER\_TEST" on `/mission/state` | Milestone 5 (SEARCHING) |
+| TARGET\_HOVER state | After APPROACHING's `over_target`: hover over the die `target_hover_s`, then `return` (LANDING in place). Published as "TARGET\_HOVER" on `/mission/state`; pausable; retargets like DESCENDING | Milestone 6 (DESCENDING) |
 | `return` outcome | LANDING in place (the drone has not left the start position yet) | Milestone 8 (RETURNING) |
-| `resume_new_intent` | HOVER\_TEST instead of SEARCHING | Milestone 5 |
-| `retrieve` with a new color | Updates `active_target` only, no retarget | Milestone 5 |
-| `update_only` and region fields | Stored, no behavior | Milestone 9 |
+| `update_only` and region fields | Stored, no behavior; every dice-map position fits the intent (no target-quadrant or avoid check in SEARCHING's entry check or APPROACHING) | Milestone 9 |
 | `read_chip` | Always rejected ("not on the die"): no on-die states yet | Milestone 7 |
 
 ## Transitions
@@ -121,7 +120,7 @@ Wire these as the SMACH `transitions={...}` map for each state. Global outcomes 
 | SEARCHING | `target_found` | Dice map reports the active color | APPROACHING |
 | APPROACHING | `over_target` | At hover height over the centroid, centered, color check right | DESCENDING |
 | APPROACHING | `wrong_color_known` | Color check wrong; the target color is elsewhere in the dice map | APPROACHING (new goal) |
-| APPROACHING | `wrong_color_unknown`, `lost` | Color check WRONG with target not in the map, or no detection for TBD s (`target_lost_s`; also covers a die whose color is never confirmed) | SEARCHING |
+| APPROACHING | `wrong_color_unknown`, `lost` | Color check WRONG with target not in the map; or no `target_relative` for `target_lost_s`; or no confirmed color `color_confirm_timeout_s` after arriving | SEARCHING |
 | DESCENDING | `touchdown` | Touchdown confirmed over the centroid | NFC\_READY (motor stage 1) |
 | DESCENDING | `retry` | Sideways error over tolerance or die lost; retries left | DESCENDING (after climbing to hover height) |
 | DESCENDING | `failed` | Descent retries used | APPROACHING |
@@ -195,11 +194,11 @@ Comms owns `Intent`, `MissionState`, `NfcResult` and `LlmHeartbeat` in `avc_msgs
 | --- | --- | --- | --- |
 | Comms | `/mission/intent` | `avc_msgs/Intent` | Reliable, volatile, keep last 10 |
 | Comms | `/llm/heartbeat` | `avc_msgs/LlmHeartbeat` at 5 Hz: `last_state_seq`, `last_nfc_read_id` (the echo that completes an NFC read), `link_ok` (radio link to the leader). Comms liveness is judged by message age | Reliable, volatile, keep last 10 (Abhi's proposal) |
-| Perception | `/perception/dice_map` (placeholder) | Every die seen: color and xyz centroid in the field frame | TBD |
-| Perception | `/perception/target_relative` | Target position relative to the drone from the downward camera | During APPROACHING and DESCENDING |
+| Perception | `/perception/dice_map` | `avc_interfaces/DiceMap` (placeholder): every die seen, color and xyz centroid in the field frame | Best effort, volatile, keep last 10 (TBD) |
+| Perception | `/perception/target_relative` | `avc_interfaces/TargetRelative` (placeholder): `valid`, offset = target minus drone, field ENU meters. Perception picks the die nearest `/mission/target` | Best effort, volatile, keep last 10 (TBD); used during APPROACHING and DESCENDING |
 | Perception | `/perception/color_check` | `ColorCheck.msg` (placeholder): Perception's confirmed color from BrainChip on the downward camera; GNC reads only the color | APPROACHING to RETRIEVING |
-| Perception | `/perception/obstacle_detections` | Obstacle position, size | Continuous |
-| Perception | `/perception/heartbeat` | Alive, VIO and detector health | 5 Hz |
+| Perception | `/perception/obstacle_detections` | `avc_interfaces/ObstacleArray` (placeholder): x, y, radius per obstacle, field frame | Best effort, volatile, keep last 10 (TBD) |
+| Perception | `/perception/heartbeat` | `avc_interfaces/PerceptionHeartbeat` (placeholder): `vio_ok`, `detector_ok`; liveness by age, 5 Hz | Best effort, volatile, keep last 10 (TBD) |
 | Hardware | `/hw/nfc/status` | idle, reading, fault | On change |
 | Hardware | `/hw/nfc/result` | success or failed, message text | After each read |
 | Hardware | `/hw/gripper/status` | open, closed, holding, fault | On change |
@@ -211,7 +210,7 @@ Comms owns `Intent`, `MissionState`, `NfcResult` and `LlmHeartbeat` in `avc_msgs
 | --- | --- | --- | --- |
 | Everyone | `/mission/state` | `avc_msgs/MissionState`, 5 Hz and on every change or handled intent | Reliable, transient local, keep last 1 |
 | Comms | `/mission/nfc_result` | `avc_msgs/NfcResult`, every read attempt; republished each heartbeat until `last_nfc_read_id` on `/llm/heartbeat` echoes its `read_id` | Reliable, transient local, keep last 10 |
-| Everyone | `/mission/target` | Active color and centroid once known | Reliable, transient local |
+| Everyone | `/mission/target` | `avc_interfaces/MissionTarget` (GNC placeholder): `color`, `known`, `centroid` (field frame), sent when either changes | Reliable, transient local, keep last 1 |
 | Hardware | `/hw/nfc/command` | start, cancel | Reliable |
 | Hardware | `/hw/gripper/command` | open, close, release | Reliable |
 | PX4 | `/fmu/in/offboard_control_mode`, `trajectory_setpoint`, `vehicle_command` | Offboard heartbeat, setpoints, arm / disarm / mode / land | Best effort |
@@ -273,7 +272,9 @@ All fifteen SMACH states live in one file, `mission_manager_smach.py`, with no r
 ```
 ~/dev/ros2_ws/src/
     avc_msgs -> avc-comms-ws/src/avc_msgs   (comms-owned, pinned at 366e2ba, never edited)
-    avc_interfaces/msg/  ColorCheck.msg  TargetDetection.msg  (+ Perception's dice map message)
+    avc_interfaces/msg/  ColorCheck.msg  TargetDetection.msg  DiceMap.msg  DiceMapEntry.msg
+                         TargetRelative.msg  ObstacleArray.msg  Obstacle.msg  PerceptionHeartbeat.msg
+                         MissionTarget.msg   (placeholders until Perception confirms)
     gnc_offboard/
 
 gnc_offboard/gnc_offboard/
@@ -285,17 +286,25 @@ gnc_offboard/gnc_offboard/
         qos.py                   # every QoS profile in one place
         state_msg.py             # the one MissionState builder
         mission_manager_smach.py # MissionStateBase + all 15 states + build_state_machine(ctx, io, cfg)
-    planning/                    # search pattern, path planner (existing or stubs)
+        intents.py  config.py  clock.py
+        field.py                 # FieldConfig from the world manifest (sim) or config/field.yaml (hardware)
+        coverage.py              # coverage memory: ground already searched
+        dice.py                  # dice-map and obstacle lookups
+        search.py                # SEARCHING's path from the search planners (search_pattern)
+    search_planners.py  search_regions.py   # existing planners (frontier takes seen= from coverage)
     guidance/px4_interface.py    # arming, disarming, offboard handshake, setpoints (lifted from mission_demo.py)
+    guidance/path_follower.py    # waypoints -> smooth setpoints (CubicSegment per leg)
     ros/mission_manager_node.py  # subscriptions, timers, RosMissionIO, thread running sm.execute()
     sim/
         fake_intent.py           # CLI: any intent, including stop-word style with empty fields
         fake_comms.py            # LLM heartbeat at 5 Hz; echoes last_nfc_read_id and last_state_seq, link_ok (scriptable: delay or withhold the echo)
         fake_hardware.py         # NFC reader + gripper stand-in with configurable failures per motor stage
-        fake_dice_map.py         # Perception dice map + target-relative + color check from the world manifest
-        fake_heartbeats.py       # Perception heartbeat
+        perception_model.py      # pure: what a stand-in Perception reports, shared by fake_dice_map and tests
+        fake_dice_map.py         # Perception dice map, target_relative, color check, obstacles and heartbeat
+                                 # from the world manifest and the camera model (wrong_color_first, drop_detections, heartbeat)
 
 gnc_offboard/config/mission.yaml
+gnc_offboard/config/field.yaml          # hardware field geometry (TBD values)
 gnc_offboard/launch/mission.launch.py   # mission_manager, plus sim stand-ins when sim:=true
 gnc_offboard/test/
     test_checks.py  test_states.py  test_global_checks.py  test_intents.py  test_state_msg.py  test_qos.py
@@ -313,10 +322,18 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `ekf_stable_s`, `arm_timeout_s` | PREFLIGHT, LIFTOFF | 2.0, 10.0 |
 | `offboard_warmup_s`, `cmd_retry_s` | PREFLIGHT, LANDING, PAUSED, ABORTED | 1.0, 1.0 |
 | `require_pilot_arm` | PREFLIGHT | false (SITL); true on hardware |
-| `hover_test_s` | HOVER\_TEST (temporary) | 5.0 |
 | `landed_disarm_grace_s` | LANDING | 0.5 |
 | `search_altitude_m`, `altitude_tol_m` | TAKEOFF, SEARCHING | 1.5, 0.15 |
-| `target_lost_s` | APPROACHING, DESCENDING | 2.0 |
+| `target_lost_s` | APPROACHING, DESCENDING (no `target_relative`) | 2.0 |
+| `color_confirm_timeout_s` | APPROACHING (no confirmed color after arriving) | 5.0 (TBD) |
+| `approach_center_tol_m`, `die_match_radius_m` | APPROACHING | 0.10, 0.3 (TBD) |
+| `target_hover_s` | TARGET\_HOVER (temporary) | 5.0 |
+| `search_pattern` | SEARCHING | `frontier` (`lawnmower`, `zone_sweep` for comparison) |
+| `detect_fov_deg` | SEARCHING coverage, footprint | 70 (TBD: width Perception detects dice in, not the 120 deg lens FOV) |
+| `search_overlap`, `coverage_cell_m`, `wall_margin_m`, `obstacle_clearance_m` | SEARCHING, APPROACHING | 0.2, 0.5, 1.0, 0.5 |
+| `cruise_speed_mps`, `max_accel_mps2`, `acceptance_radius_m` | Path following | 1.0, 0.5, 0.25 |
+| `require_perception` | Global | true (false: lab flights without Perception) |
+| `field_file` | Field frame | '' = sim world manifest; `config/field.yaml` on hardware |
 | `hover_height_m` | APPROACHING, DESCENDING, LIFTOFF | 1.0 |
 | `descent_stages_m` | DESCENDING | \[1.0, 0.5, 0.25\] |
 | `descent_rate_mps` | DESCENDING | 0.15 |
@@ -363,7 +380,7 @@ The state machine must be fully testable without Gazebo or PX4, then flown in PX
 | Staleness | A heartbeat that stops updating triggers its failure path after the configured time |
 | Color check | RIGHT when the confirmed color equals the target, WRONG when it differs, PENDING when missing or empty; PENDING never causes a transition; `confidence` is ignored |
 
-**Sim stand-ins (ROS nodes, sim only):** `fake_intent.py`, `fake_comms.py`, `fake_hardware.py`, `fake_dice_map.py` and `fake_heartbeats.py` (see File layout).
+**Sim stand-ins (ROS nodes, sim only):** `fake_intent.py`, `fake_comms.py`, `fake_hardware.py` and `fake_dice_map.py` (which also publishes the Perception heartbeat; see File layout).
 
 **SITL acceptance runs**
 
@@ -426,7 +443,8 @@ The builder should code these behind a parameter or a clearly marked default, no
 
 **For Perception**
 
-- [ ] **Dice map:** topic name, message type and rate.
+- [ ] **Dice map:** topic name, message type and rate. GNC uses placeholders: `DiceMap`, `TargetRelative` (offset in field ENU), `ObstacleArray`, `PerceptionHeartbeat`.
+- [ ] **Detection width:** across what width (or angle) can Perception actually detect dice from search altitude? The lens is 120 deg; GNC plans coverage with `detect_fov_deg` (placeholder 70) until Perception says.
 - [ ] **Final approach:** rate and accuracy of `/perception/target_relative` below 1 m, and the camera blind height.
 - [ ] **Color confirmation (Perception's decision, not GNC's):** BrainChip's confidence threshold and window, from test data under venue lighting, and the final `ColorCheck.msg` format. GNC only reads the confirmed color.
 

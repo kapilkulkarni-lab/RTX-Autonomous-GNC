@@ -368,14 +368,21 @@ copy ones worth keeping somewhere safe, since `make distclean` deletes them.
 ## Flying mission_manager (SITL)
 
 `mission_manager` is the one node that flies the mission (spec: `docs/mission_manager_outline.md`).
-Milestone 3 flies: STANDBY → PREFLIGHT → TAKEOFF → HOVER_TEST → LANDING → RETURN_CONFIRMED, plus
-ABORTED. HOVER_TEST (hover `hover_test_s`, then land in place) is **temporary** until SEARCHING
-exists. Parameters live in `gnc_offboard/config/mission.yaml`; override any with `-p name:=value`.
+It flies STANDBY → PREFLIGHT → TAKEOFF → SEARCHING → APPROACHING → TARGET_HOVER → LANDING →
+RETURN_CONFIRMED, plus ABORTED and PAUSED. TARGET_HOVER (hover over the die `target_hover_s`, then
+land in place) is **temporary** until DESCENDING exists. Parameters live in
+`gnc_offboard/config/mission.yaml`; override any with `-p name:=value`. In sim the field frame
+comes from the world manifest; on hardware pass `-p field_file:=.../config/field.yaml`.
 
 1. Start the sim (Gazebo + PX4 + XRCE agent + dev pane): `~/dev/avc-gnc/start_sim.sh -H`.
    Wait until PX4's pane says it is ready. If arming is denied for manual control, run
    `param set COM_RC_IN_MODE 4` in the PX4 pane.
-2. In the dev pane: `ros2 run gnc_offboard mission_manager`. It waits in STANDBY.
+2. Start the Perception stand-in (sim only; without it mission_manager aborts after takeoff on
+   the Perception heartbeat check, unless `-p require_perception:=false`):
+   ```bash
+   ros2 run gnc_offboard fake_dice_map
+   ```
+   In the dev pane: `ros2 run gnc_offboard mission_manager`. It waits in STANDBY.
 3. In another terminal (`gnc` first), watch the state:
    ```bash
    ros2 topic echo /mission/state --qos-reliability reliable --qos-durability transient_local
@@ -396,7 +403,21 @@ exists. Parameters live in `gnc_offboard/config/mission.yaml`; override any with
    ```
    While PAUSED the drone hovers where it is (on the ground: stays put; PREFLIGHT disarms) and
    `previous_state` shows the state it paused from. Resume goes back to that state, unless a
-   `retrieve` or `update_only` arrived while paused (then HOVER_TEST for now; SEARCHING later).
+   `retrieve` or `update_only` arrived while paused (then SEARCHING).
+
+7. Search and approach checks (the target colors are in `worlds/avc_field_manifest.json`):
+   ```bash
+   P='ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent'
+   ros2 topic echo /mission/target --qos-reliability reliable --qos-durability transient_local
+   # Wrong color first: restart fake_dice_map so the first die seen is reported as the target color
+   ros2 run gnc_offboard fake_dice_map --ros-args -p wrong_color_first:=red
+   # Retarget mid-search (while SEARCHING): unseen color -> SEARCHING, seen color -> APPROACHING
+   $P "{intent_id: 10, action: retrieve, target_color: yellow}"
+   # Perception dropout: detections off (APPROACHING -> SEARCHING: target lost), then heartbeat off (ABORTED)
+   ros2 param set /fake_dice_map drop_detections true
+   ros2 param set /fake_dice_map heartbeat false
+   ```
+   Compare search patterns with `-p search_pattern:=lawnmower` (or `zone_sweep`; default `frontier`).
 
 `require_pilot_arm:=true` makes PREFLIGHT wait for the pilot to arm (GNC never sends arm); use it
 on hardware. After RETURN_CONFIRMED or ABORTED the node keeps publishing its final state; Ctrl+C

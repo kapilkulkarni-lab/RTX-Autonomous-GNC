@@ -6,7 +6,7 @@ import threading
 import pytest
 import yaml
 
-from conftest import CONFIG_YAML, intent
+from conftest import CONFIG_YAML, TEST_MANIFEST, intent
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.config import MissionConfig, load_yaml_params
 
@@ -23,7 +23,7 @@ def test_yaml_values_and_markers():
     assert (cfg.loop_hz, cfg.setpoint_hz, cfg.state_pub_hz) == (20.0, 20.0, 5.0)
     text = CONFIG_YAML.read_text()
     assert 'force_return_at_s: 360.0      # TBD' in text
-    assert 'TEMPORARY' in text and 'hover_test_s' in text
+    assert 'TEMPORARY' in text and 'target_hover_s' in text
 
 
 def test_config_rejects_missing_unknown_and_bad_bool():
@@ -40,7 +40,8 @@ def test_config_rejects_missing_unknown_and_bad_bool():
 def node():
     rclpy = pytest.importorskip('rclpy')
     from gnc_offboard.ros.mission_manager_node import MissionManagerNode
-    rclpy.init(args=['--ros-args', '-p', 'hover_test_s:=7.5'])
+    rclpy.init(args=['--ros-args', '-p', 'target_hover_s:=7.5',
+                     '-p', f'field_file:={TEST_MANIFEST}'])
     n = MissionManagerNode(config_path=str(CONFIG_YAML))
     yield n
     n.stop_mission()
@@ -49,7 +50,7 @@ def node():
 
 
 def test_node_loads_parameters_with_overrides(node, cfg):
-    assert node.cfg == dataclasses.replace(cfg, hover_test_s=7.5)
+    assert node.cfg == dataclasses.replace(cfg, target_hover_s=7.5, field_file=str(TEST_MANIFEST))
 
 
 def test_node_publishes_state_without_px4(node):
@@ -86,3 +87,39 @@ def test_node_runs_machine_in_worker_thread_and_preempts(node):
 def test_installed_yaml_is_a_ros_params_file():
     data = yaml.safe_load(CONFIG_YAML.read_text())
     assert list(data) == ['mission_manager'] and 'ros__parameters' in data['mission_manager']
+
+
+def test_node_publishes_mission_target_on_change(node):
+    sent = []
+    node.target_pub.publish = sent.append
+    node.publish_target()
+    assert sent == []                              # no target yet
+    node.ctx.active_target = 'red'
+    node.publish_target()
+    node.publish_target()                          # unchanged: not sent again
+    node.ctx.target_centroid = (2.0, 2.0, 0.0)
+    node.publish_target()
+    assert [(m.color, m.known) for m in sent] == [('red', False), ('red', True)]
+    assert (sent[1].centroid.x, sent[1].centroid.y) == (2.0, 2.0)
+    assert sent[1].header.frame_id == 'map'
+
+
+def test_node_loads_field_and_subscribes_to_perception(node):
+    assert node.ctx.field_config.px4_origin == (-6.096, -6.096)
+    topics = {s.topic_name for s in node.subscriptions}
+    assert {'/perception/dice_map', '/perception/target_relative', '/perception/color_check',
+            '/perception/obstacle_detections', '/perception/heartbeat'} <= topics
+
+
+def test_node_accepts_require_perception_false():
+    """The startup warning itself is a plain logger call; this checks the parameter path."""
+    rclpy = pytest.importorskip('rclpy')
+    from gnc_offboard.ros.mission_manager_node import MissionManagerNode
+    rclpy.init(args=['--ros-args', '-p', 'require_perception:=false',
+                     '-p', f'field_file:={TEST_MANIFEST}'])
+    try:
+        n = MissionManagerNode(config_path=str(CONFIG_YAML))
+        assert n.cfg.require_perception is False
+        n.destroy_node()
+    finally:
+        rclpy.shutdown()

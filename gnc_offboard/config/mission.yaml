@@ -21,14 +21,13 @@ mission_manager:
     search_altitude_m: 1.5        # TBD: above the start position
     altitude_tol_m: 0.15          # TBD
 
-    # HOVER_TEST (TEMPORARY, Milestone 3 only; replaced by SEARCHING in Milestone 5)
-    hover_test_s: 5.0
-
     # LANDING
     landed_disarm_grace_s: 0.5    # disarm seen before PX4's landed flag: wait this long for it
 
     # Global checks
     pose_invalid_s: 1.0           # TBD: position invalid or stale this long -> ABORTED
+    perception_stale_s: 1.0       # TBD: Perception heartbeat older than this while airborne -> ABORTED
+    require_perception: true      # false: skip the Perception heartbeat check (lab flights without Perception)
     px4_status_stale_s: 1.0       # TBD: no vehicle_status this long while airborne -> ABORTED
     battery_return_pct: 30.0      # TBD: below this -> return
     force_return_at_s: 360.0      # TBD: mission clock past this -> return (limit is 420 s)
@@ -38,3 +37,28 @@ mission_manager:
 
     # Startup
     px4_discovery_timeout_s: 20.0 # give up if no PX4 topics appear
+
+    # Field frame: a world manifest (.json, sim) or a field config (.yaml, hardware:
+    # config/field.yaml). '' = the sim world manifest ($AVC_SIM_DIR/worlds/avc_field_manifest.json).
+    field_file: ''
+
+    # SEARCHING
+    search_pattern: frontier      # frontier | lawnmower | zone_sweep (comparison in SITL)
+    detect_fov_deg: 70.0          # TBD: width Perception can detect dice in (not the 120 deg lens FOV)
+    search_overlap: 0.2           # lawnmower / zone_sweep row overlap
+    coverage_cell_m: 0.5          # coverage memory cell size
+    wall_margin_m: 1.0            # TBD: fly no closer than this to the field edge
+    obstacle_clearance_m: 0.5     # TBD: keep this far from obstacle edges
+    cruise_speed_mps: 1.0         # TBD: peak speed per leg
+    max_accel_mps2: 0.5           # TBD
+    acceptance_radius_m: 0.25     # waypoint reached within this
+
+    # APPROACHING
+    hover_height_m: 1.0           # TBD: height above the start position over the die
+    target_lost_s: 2.0            # TBD: no target_relative this long after arriving -> lost
+    color_confirm_timeout_s: 5.0  # TBD: no confirmed color this long after arriving -> lost
+    approach_center_tol_m: 0.10   # TBD: centered over the die within this
+    die_match_radius_m: 0.3       # TBD: dice-map entries this close are the same die
+
+    # TARGET_HOVER (TEMPORARY, Milestone 5 only; replaced by DESCENDING in Milestone 6)
+    target_hover_s: 5.0

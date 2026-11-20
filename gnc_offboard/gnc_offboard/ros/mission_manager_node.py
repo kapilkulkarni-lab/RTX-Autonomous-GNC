@@ -21,14 +21,18 @@ from typing import Optional
 import rclpy
 from rclpy.node import Node
 
+from avc_interfaces.msg import (ColorCheck, DiceMap, MissionTarget, ObstacleArray,
+                                PerceptionHeartbeat, TargetRelative)
 from avc_msgs.msg import Intent, LlmHeartbeat, MissionState
 from px4_msgs.msg import BatteryStatus, VehicleLandDetected, VehicleLocalPosition, VehicleStatus
 
+from gnc_offboard.field_map import default_manifest_path
 from gnc_offboard.guidance import px4_interface as px4
 from gnc_offboard.mission import qos
 from gnc_offboard.mission.clock import MonotonicClock
 from gnc_offboard.mission.config import MissionConfig, load_yaml_params
 from gnc_offboard.mission.context import MissionContext
+from gnc_offboard.mission.field import FieldConfig
 from gnc_offboard.mission.io import MissionIO
 from gnc_offboard.mission.mission_manager_smach import build_state_machine, run_mission
 from gnc_offboard.mission.state_msg import MissionStateBuilder
@@ -97,8 +101,16 @@ class MissionManagerNode(Node):
             {name: self.get_parameter(name).value for name in MissionConfig.names()})
         if self.cfg.require_pilot_arm:
             self.get_logger().info('require_pilot_arm: true. The pilot arms; GNC never sends arm.')
+        if not self.cfg.require_perception:
+            self.get_logger().warning(
+                'require_perception: false. The Perception heartbeat check is OFF '
+                '(lab flights without Perception only).')
 
         self.ctx = MissionContext()
+        field_file = self.cfg.field_file or str(default_manifest_path())
+        self.ctx.field_config = FieldConfig.load(field_file)
+        self.get_logger().info(f'Field frame from {field_file}')
+        self._last_target = None
         self.io = RosMissionIO(self)
         self.clock = MonotonicClock()
         self.builder = MissionStateBuilder()
@@ -113,7 +125,17 @@ class MissionManagerNode(Node):
         self.create_subscription(Intent, '/mission/intent', self._store('intent'), qos.INTENT)
         self.create_subscription(LlmHeartbeat, '/llm/heartbeat', self._store('llm_heartbeat'),
                                  qos.LLM_HEARTBEAT)
+        for msg_type, topic, name in (
+                (DiceMap, '/perception/dice_map', 'dice_map'),
+                (TargetRelative, '/perception/target_relative', 'target_relative'),
+                (ColorCheck, '/perception/color_check', 'color_check'),
+                (ObstacleArray, '/perception/obstacle_detections', 'obstacles'),
+                (PerceptionHeartbeat, '/perception/heartbeat', 'perception_heartbeat')):
+            self.create_subscription(msg_type, topic, self._store(name), qos.BY_TOPIC[topic])
+        self.target_pub = self.create_publisher(MissionTarget, '/mission/target',
+                                                qos.MISSION_TARGET)
         self.create_timer(1.0 / self.cfg.state_pub_hz, self.publish_state)
+        self.create_timer(1.0 / self.cfg.state_pub_hz, self.publish_target)
 
     # ---- callbacks: store only ------------------------------------------------------------------
     def _store(self, name):
@@ -157,6 +179,22 @@ class MissionManagerNode(Node):
         with self._pub_lock:
             msg = self.builder.build(stamp_ns=self.get_clock().now().nanoseconds, **fields)
             self.state_pub.publish(msg)
+
+    def publish_target(self) -> None:
+        """/mission/target whenever the active color or its known centroid changes."""
+        with self.ctx.lock:
+            current = (self.ctx.active_target, self.ctx.target_centroid)
+        if current == self._last_target or not current[0]:
+            return
+        self._last_target = current
+        msg = MissionTarget()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'map'
+        msg.color = current[0]
+        msg.known = current[1] is not None
+        if msg.known:
+            msg.centroid.x, msg.centroid.y, msg.centroid.z = (float(v) for v in current[1])
+        self.target_pub.publish(msg)
 
     # ---- state machine thread -------------------------------------------------------------------
     def start_mission(self) -> None:

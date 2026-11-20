@@ -15,6 +15,7 @@ from gnc_offboard.mission.context import MissionContext  # noqa: E402
 from gnc_offboard.mission.io import FakeIO  # noqa: E402
 
 CONFIG_YAML = Path(__file__).resolve().parents[1] / 'config' / 'mission.yaml'
+TEST_MANIFEST = Path(__file__).resolve().parent / 'data' / 'field_manifest.json'
 
 ARMED, DISARMED = VehicleStatus.ARMING_STATE_ARMED, VehicleStatus.ARMING_STATE_DISARMED
 OFFBOARD = VehicleStatus.NAVIGATION_STATE_OFFBOARD
@@ -41,6 +42,10 @@ def land_detected(landed):
     m = VehicleLandDetected()
     m.landed = landed
     return m
+
+
+def heartbeat():
+    return SimpleNamespace(vio_ok=True, detector_ok=True)
 
 
 def battery(remaining):
@@ -70,8 +75,18 @@ def clock():
 
 
 @pytest.fixture
-def ctx():
-    return MissionContext()
+def field_config():
+    from gnc_offboard.mission.field import FieldConfig
+    return FieldConfig.load(TEST_MANIFEST)
+
+
+@pytest.fixture
+def ctx(field_config, cfg):
+    from gnc_offboard.mission.coverage import CoverageMap
+    c = MissionContext()
+    c.field_config = field_config
+    c.coverage = CoverageMap(field_config.bounds, cfg.coverage_cell_m)
+    return c
 
 
 @pytest.fixture
@@ -128,6 +143,8 @@ class FakePx4:
         self.accept_offboard = True
         self.accept_disarm = True
         self.armed, self.nav, self.z, self.landed = False, POSCTL, 0.0, True
+        self.x = self.y = 0.0
+        self.speed = 3.0                  # m/s horizontal limit (setpoints move slower)
         self.landed_at = None
         self.seen = 0
         clock.hooks.append(self.tick)
@@ -150,9 +167,13 @@ class FakePx4:
                 self.nav = AUTO_LAND
         self.seen = len(self.io.calls)
         if self.armed and self.nav == OFFBOARD and self.io.setpoint is not None:
-            target = self.io.setpoint[2]
+            tx, ty, target = self.io.setpoint[:3]
             step = max(-self.climb * dt, min(self.climb * dt, target - self.z))
             self.z += step
+            dx, dy = tx - self.x, ty - self.y
+            d = (dx * dx + dy * dy) ** 0.5
+            k = min(1.0, self.speed * dt / d) if d > 1e-9 else 0.0
+            self.x, self.y = self.x + k * dx, self.y + k * dy
             self.landed = self.z >= -0.02 and target >= -0.02
         elif self.armed and self.nav == AUTO_LAND:
             self.z = min(0.0, self.z + 0.5 * dt)
@@ -165,15 +186,20 @@ class FakePx4:
 
     def publish(self, now):
         self.ctx.update_input('vehicle_status', status(self.armed, self.nav), now)
-        self.ctx.update_input('local_position', position(z=self.z), now)
+        self.ctx.update_input('local_position', position(self.x, self.y, self.z), now)
         self.ctx.update_input('land_detected', land_detected(self.landed), now)
         self.ctx.update_input('battery_status', battery(0.9), now)
 
 
 @pytest.fixture
-def fake_px4(ctx, io, clock):
-    """fake_px4(io=..., **options): follows the given IO (default: the `io` fixture)."""
-    return lambda io_=None, **kw: FakePx4(ctx, io if io_ is None else io_, clock, **kw)
+def fake_px4(ctx, io, clock, cfg):
+    """fake_px4(io=..., perception=True, **options): follows the given IO (default: the `io`
+    fixture). With perception (default), a FakePerception runs on it too (px4.perception)."""
+    def make(io_=None, perception=True, **kw):
+        px4 = FakePx4(ctx, io if io_ is None else io_, clock, **kw)
+        px4.perception = FakePerception(ctx, px4, clock, cfg) if perception else None
+        return px4
+    return make
 
 
 class RecordingIO(FakeIO):
@@ -233,3 +259,71 @@ def transitions_of(io):
     """State names entered, from the transition log lines."""
     return [text.split(' -> ')[1].split(':')[0] for level, text in io.logs
             if level == 'info' and ' -> ' in text]
+
+
+class FakePerception:
+    """Perception stand-in for full runs: the shared PerceptionModel (sim/perception_model.py)
+    with a nadir square footprint of footprint(height, detect_fov_deg). Publishes the dice map,
+    target_relative, color_check (only when confirmed) and the heartbeat into the context on
+    every tick. Switches: drop (no detections), beating (heartbeat on/off)."""
+
+    def __init__(self, ctx, px4, clock, cfg, manifest_path=TEST_MANIFEST, dice=None,
+                 view_all=False, **model_kw):
+        import json
+        from gnc_offboard import search_planners as sp
+        from gnc_offboard.sim.perception_model import PerceptionModel, square_view
+        self.ctx, self.px4, self.cfg, self.sp, self.square_view = ctx, px4, cfg, sp, square_view
+        if dice is not None:
+            self.model = PerceptionModel(dice, **model_kw)
+        else:
+            self.model = PerceptionModel.from_manifest(
+                json.loads(Path(manifest_path).read_text()), **model_kw)
+        self.view_all = view_all            # every die visible from anywhere (scenario tests)
+        self.drop, self.beating = False, True
+        self.obstacles = []
+        clock.hooks.append(self.tick)
+        self.tick(clock.now())
+
+    def drone(self):
+        x, y, _ = self.ctx.field_config.frame.to_field(self.px4.x, self.px4.y, self.px4.z)
+        return (x, y, -self.px4.z)
+
+    def tick(self, now):
+        drone = self.drone()
+        if self.view_all:
+            view = lambda x, y: True  # noqa: E731
+        elif drone[2] > 0.1:
+            view = self.square_view(drone, self.sp.footprint(drone[2], self.cfg.detect_fov_deg))
+        else:
+            view = lambda x, y: False  # noqa: E731
+        target = self.ctx.target_centroid
+        out = self.model.update(drone, view, target[:2] if target else None, drop=self.drop)
+        up = self.ctx.update_input
+        up('dice_map', SimpleNamespace(dice=[
+            SimpleNamespace(color=c, centroid=SimpleNamespace(x=p[0], y=p[1], z=p[2]))
+            for c, p in out.dice]), now)
+        rel = out.target_relative
+        up('target_relative', SimpleNamespace(
+            valid=rel is not None,
+            offset=SimpleNamespace(x=rel[0], y=rel[1], z=rel[2]) if rel else
+            SimpleNamespace(x=0.0, y=0.0, z=0.0)), now)
+        if out.color:
+            up('color_check', SimpleNamespace(color_guess=out.color, confidence=1.0), now)
+        up('obstacles', SimpleNamespace(obstacles=[
+            SimpleNamespace(x=x, y=y, radius=r) for x, y, r in self.obstacles]), now)
+        if self.beating:
+            up('perception_heartbeat', heartbeat(), now)
+
+
+@pytest.fixture
+def fake_perception(ctx, clock, cfg):
+    """fake_perception(px4, **PerceptionModel options)"""
+    return lambda px4, **kw: FakePerception(ctx, px4, clock, cfg, **kw)
+
+
+def flight(ctx, io, cfg, clock, fake_px4, fake_perception, color='red', px4_kw=None, **perc_kw):
+    """Start a full run: fake PX4 + fake Perception + a retrieve for `color`."""
+    px4 = fake_px4(io, perception=False, **(px4_kw or {}))
+    perception = fake_perception(px4, **perc_kw)
+    ctx.update_input('intent', intent('retrieve', color, 1), clock.now())
+    return px4, perception

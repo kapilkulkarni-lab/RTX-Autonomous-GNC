@@ -91,8 +91,8 @@ def test_stamp_and_other_fields():
     assert msg.mission_time_s == pytest.approx(12.5)
 
 
-def test_temporary_hover_test_is_publishable():
+def test_temporary_target_hover_is_publishable():
     b = MissionStateBuilder()
-    msg = b.build(state=S.HOVER_TEST, previous_state=S.TAKEOFF)
-    assert msg.state == 'HOVER_TEST'
-    assert b.build(state=S.LANDING, previous_state=S.HOVER_TEST).previous_state == 'HOVER_TEST'
+    msg = b.build(state=S.TARGET_HOVER, previous_state=S.TAKEOFF)
+    assert msg.state == 'TARGET_HOVER'
+    assert b.build(state=S.LANDING, previous_state=S.TARGET_HOVER).previous_state == 'TARGET_HOVER'

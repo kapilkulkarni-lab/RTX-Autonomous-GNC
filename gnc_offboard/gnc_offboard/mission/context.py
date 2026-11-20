@@ -79,7 +79,14 @@ class MissionContext:
     active_target: str = ''                  # blue | red | yellow | black, '' if none
     regions: Any = None                      # intents.RegionFields as received; behavior: Milestone 9
     mission_start_time: Optional[float] = None
-    start_position: Optional[Any] = None     # recorded in PREFLIGHT, field frame
+    start_position: Optional[Any] = None     # recorded in PREFLIGHT: PX4 NED x, y, z, yaw
+    start_field: Optional[Any] = None        # the same point in the field frame: x, y, z
+
+    # Field and search (Milestone 5).
+    field_config: Any = None                 # field.FieldConfig
+    coverage: Any = None                     # coverage.CoverageMap: ground already searched
+    target_centroid: Optional[Any] = None    # field x, y, z of the target die once known
+    given_up_dice: List[Any] = field(default_factory=list)  # field points: wrong color or lost
 
     # State bookkeeping (state names come from state_names.py).
     state: str = ''

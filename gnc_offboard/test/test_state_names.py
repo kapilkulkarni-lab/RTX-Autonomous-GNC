@@ -33,11 +33,12 @@ def test_groups():
     assert S.END_STATES == {S.RETURN_CONFIRMED, S.ABORTED}
 
 
-def test_temporary_hover_test_kept_out_of_all():
-    assert S.HOVER_TEST == 'HOVER_TEST'
-    assert S.HOVER_TEST not in S.ALL
-    assert S.PUBLISHABLE == S.ALL + (S.HOVER_TEST,)
-    assert S.HOVER_TEST in S.AIRBORNE
+def test_temporary_target_hover_kept_out_of_all():
+    assert S.TARGET_HOVER == 'TARGET_HOVER'
+    assert S.TARGET_HOVER not in S.ALL
+    assert S.PUBLISHABLE == S.ALL + (S.TARGET_HOVER,)
+    assert not hasattr(S, 'HOVER_TEST')         # removed in Milestone 5
+    assert S.TARGET_HOVER in S.AIRBORNE
 
 
 def test_no_other_module_hard_codes_a_state_name():

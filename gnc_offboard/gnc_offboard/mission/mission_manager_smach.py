@@ -1,15 +1,16 @@
 """mission_manager state machine (SMACH). No rclpy here: states act only through MissionIO and
 MissionContext, and get time from an injected clock, so every state runs under pytest.
 
-Built so far (Milestones 3-4):
-    STANDBY -> PREFLIGHT -> TAKEOFF -> HOVER_TEST (TEMPORARY) -> LANDING -> RETURN_CONFIRMED
-    plus ABORTED, PAUSED, the global checks and full intent handling.
+Built so far (Milestones 3-5):
+    STANDBY -> PREFLIGHT -> TAKEOFF -> SEARCHING -> APPROACHING -> TARGET_HOVER (TEMPORARY)
+    -> LANDING -> RETURN_CONFIRMED, plus ABORTED, PAUSED, the global checks, full intent
+    handling and retarget.
 
 TEMPORARY until later milestones (search for "TEMPORARY"; outline: Temporary stand-ins):
-    - HOVER_TEST stands in for SEARCHING (Milestone 5), also as the resume_new_intent target.
+    - TARGET_HOVER stands in for DESCENDING (Milestone 6): hover over the die, then return.
     - The `return` outcome goes to LANDING in place; RETURNING arrives in Milestone 8.
-    - retrieve with a new color only updates active_target (retarget: Milestone 5).
-    - Region fields are stored only (Milestone 9). read_chip is always rejected (Milestone 7).
+    - Every dice-map position fits the intent, and region fields are stored only (Milestone 9).
+    - read_chip is always rejected (Milestone 7).
 """
 import enum
 from typing import Callable, List, Optional
@@ -17,10 +18,16 @@ from typing import Callable, List, Optional
 import smach
 from avc_msgs.msg import MissionState
 
+from gnc_offboard import search_planners as sp
 from gnc_offboard.guidance import px4_interface as px4
+from gnc_offboard.guidance.path_follower import PathFollower
 from gnc_offboard.mission import intents as I
 from gnc_offboard.mission import state_names as S
-from gnc_offboard.mission.checks import invalid_for, is_stale
+from gnc_offboard.mission.checks import (ColorResult, check_color, confirmed_color, invalid_for,
+                                         is_centered, is_stale)
+from gnc_offboard.mission.coverage import CoverageMap
+from gnc_offboard.mission.dice import find_die, obstacles_of
+from gnc_offboard.mission.search import plan_search
 from gnc_offboard.mission.config import MissionConfig
 from gnc_offboard.mission.context import MissionContext, Stamped
 from gnc_offboard.mission.io import MissionIO
@@ -29,6 +36,8 @@ from gnc_offboard.mission.io import MissionIO
 ABORTED_OUT = 'aborted'
 RETURN_OUT = 'return'
 PAUSE_OUT = 'pause'
+RETARGET_SEEN = 'retarget_seen'
+RETARGET_UNSEEN = 'retarget_unseen'
 PREEMPTED = 'preempted'
 RESUME_NEW_INTENT = 'resume_new_intent'
 
@@ -47,6 +56,11 @@ CLOCK_STATES = frozenset(S.PUBLISHABLE) - {S.STANDBY, S.RETURNING, S.LANDING, S.
 # Where a return_to_start intent returns: airborne, on the die, and PREFLIGHT (stop, disarm,
 # RETURN_CONFIRMED). LANDING is already landing in place, and STANDBY has nothing to do.
 RETURN_INTENT_STATES = ((S.AIRBORNE | S.ON_DIE) - {S.LANDING}) | {S.PREFLIGHT}
+# Where a retrieve with a new color retargets ("TAKEOFF through RETURNING"; the on-die states,
+# DESCENDING, LIFTOFF and RETURNING join as they are built). TARGET_HOVER stands in for
+# DESCENDING. Elsewhere a new color only updates the target.
+RETARGET_STATES = frozenset({S.TAKEOFF, S.SEARCHING, S.APPROACHING, S.TARGET_HOVER})
+FLYING_GLOBALS = (ABORTED_OUT, RETURN_OUT, PAUSE_OUT, RETARGET_SEEN, RETARGET_UNSEEN)
 
 
 def resume_outcome(state: str) -> str:
@@ -58,6 +72,7 @@ class AbortCause(str, enum.Enum):
     PX4_CONTROL = 'px4_control'          # failsafe, offboard lost, pilot takeover, PX4 link lost
     INTENT = 'intent'                    # comms `abort`
     POSE = 'pose'                        # position estimate invalid
+    PERCEPTION = 'perception'            # Perception heartbeat stale
     PREFLIGHT_FAILED = 'preflight_failed'
 
 
@@ -104,6 +119,7 @@ class MissionStateBase(smach.State):
     def tick(self, now) -> Optional[str]:
         """One loop: global checks and intents (in the outline's priority order), then step."""
         snap = self.ctx.snapshot()
+        self._mark_coverage(snap)
         intents = self.ctx.take_intents()
         outcome = self.global_checks(snap, intents, now)
         while outcome is None and intents:
@@ -162,6 +178,9 @@ class MissionStateBase(smach.State):
                     return self.abort(AbortCause.INTENT, 'abort intent')
             if mode in S.AIRBORNE and self._pose_lost(snap, now):
                 return self.abort(AbortCause.POSE, 'position estimate invalid')
+            if (mode in S.AIRBORNE and self.cfg.require_perception
+                    and is_stale(snap.perception_heartbeat, now, self.cfg.perception_stale_s)):
+                return self.abort(AbortCause.PERCEPTION, 'Perception heartbeat lost')
         if RETURN_OUT in self.GLOBALS:
             pct = px4.battery_percent(_msg(snap.battery_status))
             if mode in BATTERY_STATES and pct is not None and pct < self.cfg.battery_return_pct:
@@ -246,13 +265,75 @@ class MissionStateBase(smach.State):
         with self.ctx.lock:
             self.ctx.regions = I.merge_regions(self.ctx.regions, msg)
             first = not self.ctx.active_target
-            if color and not first and color != self.ctx.active_target:
-                # TEMPORARY (Milestone 5): a new color only updates the target, no retarget.
-                self.ctx.active_target = color
+            new_color = bool(color) and not first and color != self.ctx.active_target
         self.ack(intent)
         if color and first and self.NAME == S.STANDBY:
             return self._start(color, now)
-        return None
+        if not new_color:
+            return None                              # same color or none: regions only
+        self.set_target(color)
+        if self.NAME not in RETARGET_STATES:
+            return None                              # e.g. PREFLIGHT, LANDING: target only
+        snap = self.ctx.snapshot()
+        if self.find_target(snap, near=self.field_xy(snap)) is not None:
+            return self.finish(RETARGET_SEEN, f'retarget {color}: in the dice map')
+        return self.finish(RETARGET_UNSEEN, f'retarget {color}: searching')
+
+    # ---- targets, dice map and field frame ------------------------------------------------------
+    def set_target(self, color: str) -> None:
+        """New target color: forget the old die and the dice given up on (they were the old
+        color). The coverage memory stays: searched ground is still searched."""
+        with self.ctx.lock:
+            self.ctx.active_target = color
+            self.ctx.target_centroid = None
+            self.ctx.given_up_dice = []
+
+    def find_target(self, snap, near=None):
+        """The active target in Perception's dice map, skipping dice given up on.
+        TEMPORARY (Milestone 9): every position fits the intent (no region checks yet)."""
+        return find_die(_msg(snap.dice_map), self.ctx.active_target, near=near,
+                        exclude=self.ctx.given_up_dice,
+                        exclude_radius_m=self.cfg.die_match_radius_m)
+
+    def give_up(self, point) -> None:
+        if point is not None:
+            with self.ctx.lock:
+                self.ctx.given_up_dice.append(tuple(point))
+                self.ctx.target_centroid = None
+
+    def field_xyz(self, lp):
+        """PX4 NED position -> field (x, y, z); z is height above the PX4 origin."""
+        return self.ctx.field_config.frame.to_field(lp.x, lp.y, lp.z)
+
+    def field_xy(self, snap):
+        lp = _msg(snap.local_position)
+        if not px4.position_valid(lp) or self.ctx.field_config is None:
+            return None
+        return self.field_xyz(lp)[:2]
+
+    def altitude(self, lp) -> float:
+        """Height above the start position (PX4 NED z is down)."""
+        start_z = self.ctx.start_position[2] if self.ctx.start_position else 0.0
+        return start_z - lp.z
+
+    def ned_at_height(self, x, y, height):
+        """Field (x, y) at `height` above the start -> PX4 NED (n, e, d)."""
+        n, e, _ = self.ctx.field_config.frame.to_ned(x, y)
+        start_z = self.ctx.start_position[2] if self.ctx.start_position else 0.0
+        return (n, e, start_z - height)
+
+    def _mark_coverage(self, snap) -> None:
+        """Mark the ground under the detection footprint as searched (airborne only)."""
+        if self.ctx.coverage is None or self.mode() not in S.AIRBORNE:
+            return
+        lp = _msg(snap.local_position)
+        if not px4.position_valid(lp):
+            return
+        alt = self.altitude(lp)
+        if alt <= 0.1:
+            return
+        x, y, _ = self.field_xyz(lp)
+        self.ctx.coverage.mark(x, y, sp.footprint(alt, self.cfg.detect_fov_deg))
 
     def on_update_only(self, intent, now):
         with self.ctx.lock:
@@ -375,8 +456,10 @@ class Preflight(MissionStateBase):
             if (now - self.valid_since < self.cfg.ekf_stable_s
                     or now - self.stream_since < self.cfg.offboard_warmup_s):
                 return None
-            # Start position in PX4 local NED (field frame: Milestone 5).
+            # Start position in PX4 local NED and in the field frame.
             self.ctx.start_position = (p.x, p.y, p.z, p.heading)
+            if self.ctx.field_config is not None:
+                self.ctx.start_field = self.field_xyz(p)
 
         if self.cfg.require_pilot_arm:
             if not px4.is_armed(status):
@@ -398,7 +481,7 @@ class Takeoff(MissionStateBase):
     """Climb straight up from the start position to search altitude."""
     NAME = S.TAKEOFF
     OUTCOMES = ('at_altitude',)
-    GLOBALS = (ABORTED_OUT, RETURN_OUT, PAUSE_OUT)
+    GLOBALS = FLYING_GLOBALS
 
     def on_entry(self, snap, now):
         x, y, z, yaw = self.ctx.start_position
@@ -412,16 +495,166 @@ class Takeoff(MissionStateBase):
         return None
 
 
-class HoverTest(MissionStateBase):
-    """TEMPORARY (Milestone 3 only; replaced by SEARCHING in Milestone 5): hover in place for
-    hover_test_s, then land in place."""
-    NAME = S.HOVER_TEST
-    OUTCOMES = ('done',)
-    GLOBALS = (ABORTED_OUT, RETURN_OUT, PAUSE_OUT)
+class Searching(MissionStateBase):
+    """Target check first: if Perception's dice map already holds the active color, leave at
+    once. Otherwise fly the search pattern (search_pattern) at search altitude, skipping ground
+    the coverage memory already holds, and leave when the dice map reports the active color.
+    Field covered without the target: clear the coverage memory and search again."""
+    NAME = S.SEARCHING
+    OUTCOMES = ('target_known', 'target_found')
+    GLOBALS = FLYING_GLOBALS
+
+    def on_entry(self, snap, now):
+        self.follower = None
+        self.known = self.find_target(snap, near=self.field_xy(snap)) is not None
+        if not self.known:
+            self.plan(snap)
+
+    def plan(self, snap, restarted=False) -> None:
+        lp = _msg(snap.local_position)
+        if not px4.position_valid(lp):
+            self.follower = None
+            return
+        cfg, fc = self.cfg, self.ctx.field_config
+        x, y, _ = self.field_xyz(lp)
+        alt = cfg.search_altitude_m
+        path = plan_search(cfg.search_pattern, fc.area(cfg.wall_margin_m), (x, y),
+                           self.ctx.coverage, sp.footprint(alt, cfg.detect_fov_deg),
+                           sp.row_spacing(alt, cfg.detect_fov_deg, cfg.search_overlap),
+                           cfg.wall_margin_m, obstacles_of(_msg(snap.obstacles)),
+                           cfg.obstacle_clearance_m)
+        if not path:
+            if restarted:
+                self.follower = None             # nothing to fly even after a reset: hover
+                return
+            with self.ctx.lock:
+                self.ctx.coverage.clear()
+                self.ctx.given_up_dice = []
+                self.ctx.reason = 'target not found, searching again'
+            self.io.request_state_publish()
+            return self.plan(snap, restarted=True)
+        waypoints = [self.ned_at_height(px, py, alt) for px, py in path]
+        yaw = self.ctx.start_position[3] if self.ctx.start_position else lp.heading
+        self.follower = PathFollower(waypoints, (lp.x, lp.y, lp.z), yaw, cfg.cruise_speed_mps,
+                                     cfg.max_accel_mps2, cfg.acceptance_radius_m)
 
     def step(self, snap, now):
-        if now - self.entered_at >= self.cfg.hover_test_s:
-            return self.finish('done', 'hover test done: landing')
+        color = self.ctx.active_target
+        if self.known:
+            return self.finish('target_known', f'{color} already in the dice map')
+        if self.find_target(snap, near=self.field_xy(snap)) is not None:
+            return self.finish('target_found', f'{color} found')
+        if self.follower is None:
+            self.plan(snap)
+            if self.follower is None:
+                return None
+        lp = _msg(snap.local_position)
+        position = (lp.x, lp.y, lp.z) if px4.position_valid(lp) else None
+        (n, e, d), yaw = self.follower.update(now, position)
+        self.io.set_setpoint(n, e, d, yaw)
+        if self.follower.done:
+            self.plan(snap)
+        return None
+
+
+class Approaching(MissionStateBase):
+    """Fly an obstacle-aware path at search altitude to the target die's centroid (from the
+    dice map), go straight down to hover_height_m, center on Perception's target_relative and
+    run the color check (PENDING never transitions)."""
+    NAME = S.APPROACHING
+    OUTCOMES = ('over_target', 'wrong_color_known', 'wrong_color_unknown', 'lost')
+    GLOBALS = FLYING_GLOBALS
+
+    def on_entry(self, snap, now):
+        self.phase = 'transit'
+        self.follower = None
+        self.arrived_at = None
+        self.last_seen = None
+        here = self.field_xy(snap)
+        self.goal = self.find_target(snap, near=here)
+        if self.goal is None or here is None:
+            self.phase = 'no_goal'
+            return
+        with self.ctx.lock:
+            self.ctx.target_centroid = self.goal
+        cfg, fc = self.cfg, self.ctx.field_config
+        gx, gy = self.goal[0], self.goal[1]
+        route, failed = sp.avoid_obstacles([(gx, gy)], here, obstacles_of(_msg(snap.obstacles)),
+                                           cfg.obstacle_clearance_m, fc.area(0.0))
+        if failed:
+            self.io.log('warn', 'no obstacle-free route to the target; flying straight')
+        waypoints = [self.ned_at_height(px, py, cfg.search_altitude_m) for px, py in route]
+        self.hover_ned = self.ned_at_height(gx, gy, cfg.hover_height_m)
+        waypoints.append(self.hover_ned)                  # then straight down over the die
+        lp = _msg(snap.local_position)
+        yaw = self.ctx.start_position[3] if self.ctx.start_position else lp.heading
+        self.yaw = yaw
+        self.follower = PathFollower(waypoints, (lp.x, lp.y, lp.z), yaw, cfg.cruise_speed_mps,
+                                     cfg.max_accel_mps2, cfg.acceptance_radius_m)
+
+    def step(self, snap, now):
+        if self.phase == 'no_goal':
+            return self.finish('lost', 'target no longer in the dice map')
+        lp = _msg(snap.local_position)
+        if not px4.position_valid(lp):
+            return None
+        if self.phase == 'transit':
+            (n, e, d), yaw = self.follower.update(now, (lp.x, lp.y, lp.z))
+            self.io.set_setpoint(n, e, d, yaw)
+            if not self.follower.done:
+                return None
+            self.phase, self.arrived_at = 'over', now
+        return self._over_die(snap, lp, now)
+
+    def _over_die(self, snap, lp, now):
+        cfg = self.cfg
+        tr = snap.target_relative
+        fresh = (tr is not None and bool(tr.msg.valid)
+                 and not is_stale(tr, now, cfg.target_lost_s))
+        centered = False
+        if fresh:
+            self.last_seen = now
+            dx, dy = float(tr.msg.offset.x), float(tr.msg.offset.y)
+            x, y, _ = self.field_xyz(lp)
+            die = (x + dx, y + dy, self.goal[2])
+            with self.ctx.lock:
+                self.ctx.target_centroid = die
+            n, e, d = self.ned_at_height(die[0], die[1], cfg.hover_height_m)
+            self.io.set_setpoint(n, e, d, self.yaw)          # center over the die
+            centered = is_centered(dx, dy, cfg.approach_center_tol_m)
+        if now - (self.last_seen or self.arrived_at) > cfg.target_lost_s:
+            self.give_up(self.goal)
+            return self.finish('lost', 'target lost')
+
+        cc = snap.color_check          # only colors confirmed since arriving over this die
+        color = confirmed_color(cc) if cc is not None and cc.rx_time >= self.arrived_at else None
+        result = check_color(color, self.ctx.active_target)
+        if result is ColorResult.WRONG:
+            self.give_up(self.goal)
+            other = self.find_target(snap, near=self.goal[:2])
+            if other is not None:
+                return self.finish('wrong_color_known', f'wrong color ({color}): going to target')
+            return self.finish('wrong_color_unknown', f'wrong color ({color}): searching')
+        if result is ColorResult.PENDING:
+            if now - self.arrived_at > cfg.color_confirm_timeout_s:
+                self.give_up(self.goal)
+                return self.finish('lost', 'no confirmed color')
+            return None
+        at_height = abs(self.altitude(lp) - cfg.hover_height_m) <= cfg.altitude_tol_m
+        if fresh and centered and at_height:
+            return self.finish('over_target', f'over the {self.ctx.active_target} die')
+        return None
+
+
+class TargetHover(MissionStateBase):
+    """TEMPORARY (Milestone 5 only; replaced by DESCENDING in Milestone 6): hover over the die
+    for target_hover_s, then return (LANDING in place until RETURNING exists)."""
+    NAME = S.TARGET_HOVER
+    GLOBALS = FLYING_GLOBALS
+
+    def step(self, snap, now):
+        if now - self.entered_at >= self.cfg.target_hover_s:
+            return self.finish(RETURN_OUT, 'target confirmed: landing (temporary)')
         return None
 
 
@@ -470,7 +703,7 @@ class Paused(MissionStateBase):
     By paused_from:
       STANDBY            nothing changes (just shows PAUSED)
       PREFLIGHT          stop arming, stop the stream, disarm if armed
-      TAKEOFF/HOVER_TEST hover where it is
+      airborne states    hover where it is
       LANDING            still descending: hover where it is (re-enter offboard);
                          already landed: stay landed (no setpoints, no offboard, no arming change)
     Global checks judge by paused_from (mode()), so abort, return, battery, pose loss and the
@@ -478,7 +711,8 @@ class Paused(MissionStateBase):
     """
     NAME = S.PAUSED
     GLOBALS = (ABORTED_OUT, RETURN_OUT)
-    PAUSABLE = (S.STANDBY, S.PREFLIGHT, S.TAKEOFF, S.HOVER_TEST, S.LANDING)
+    PAUSABLE = (S.STANDBY, S.PREFLIGHT, S.TAKEOFF, S.SEARCHING, S.APPROACHING, S.TARGET_HOVER,
+                S.LANDING)
     OUTCOMES = tuple(resume_outcome(s) for s in PAUSABLE) + (RESUME_NEW_INTENT,)
 
     def mode(self):
@@ -567,8 +801,8 @@ class Paused(MissionStateBase):
                         self.ctx.active_target = color
                         self.ctx.mission_start_time = now
                         started = True
-                    elif color:
-                        self.ctx.active_target = color   # TEMPORARY (Milestone 5): no retarget
+                    elif color and color != self.ctx.active_target:
+                        self.set_target(color)   # SEARCHING's entry check finds it if seen
                 else:
                     self.ctx.regions = I.merge_regions(self.ctx.regions, msg, hint=True)
         if pf in GROUND_STATES:
@@ -576,7 +810,7 @@ class Paused(MissionStateBase):
             # first retrieve from STANDBY starts PREFLIGHT.
             target = S.PREFLIGHT if started else pf
             return self.finish(resume_outcome(target), 'resumed with new intent')
-        # TEMPORARY (Milestone 5): SEARCHING; on the die, LIFTOFF first (Milestone 6).
+        # On the die: LIFTOFF first (Milestone 6).
         return self.finish(RESUME_NEW_INTENT, 'resumed with new intent')
 
 
@@ -668,8 +902,14 @@ class MissionOver(MissionStateBase):
 
 # =================================================================================================
 
-STATE_CLASSES = (Standby, Preflight, Takeoff, HoverTest, Landing, Paused, ReturnConfirmed,
-                 Aborted)
+STATE_CLASSES = (Standby, Preflight, Takeoff, Searching, Approaching, TargetHover, Landing,
+                 Paused, ReturnConfirmed, Aborted)
+
+# Global outcomes of the flying states (TAKEOFF through RETURNING).
+_FLYING = {ABORTED_OUT: S.ABORTED,
+           RETURN_OUT: S.LANDING,                         # TEMPORARY: RETURNING in Milestone 8
+           PAUSE_OUT: S.PAUSED,
+           RETARGET_SEEN: S.APPROACHING, RETARGET_UNSEEN: S.SEARCHING}
 
 # Each state's transitions (outcome -> next state label or container outcome).
 TRANSITIONS = {
@@ -677,16 +917,15 @@ TRANSITIONS = {
     S.PREFLIGHT: {'ready': S.TAKEOFF, 'failed': S.ABORTED, ABORTED_OUT: S.ABORTED,
                   RETURN_OUT: S.LANDING,                  # on the ground: stop, disarm, done
                   PAUSE_OUT: S.PAUSED},
-    S.TAKEOFF: {'at_altitude': S.HOVER_TEST,              # TEMPORARY: SEARCHING in Milestone 5
-                ABORTED_OUT: S.ABORTED,
-                RETURN_OUT: S.LANDING,                    # TEMPORARY: RETURNING in Milestone 8
-                PAUSE_OUT: S.PAUSED},
-    S.HOVER_TEST: {'done': S.LANDING, ABORTED_OUT: S.ABORTED,
-                   RETURN_OUT: S.LANDING,                 # TEMPORARY: RETURNING in Milestone 8
-                   PAUSE_OUT: S.PAUSED},
+    S.TAKEOFF: {'at_altitude': S.SEARCHING, **_FLYING},
+    S.SEARCHING: {'target_known': S.APPROACHING, 'target_found': S.APPROACHING, **_FLYING},
+    S.APPROACHING: {'over_target': S.TARGET_HOVER,        # TEMPORARY: DESCENDING in Milestone 6
+                    'wrong_color_known': S.APPROACHING, 'wrong_color_unknown': S.SEARCHING,
+                    'lost': S.SEARCHING, **_FLYING},
+    S.TARGET_HOVER: {**_FLYING},                          # TEMPORARY: its `return` lands
     S.LANDING: {'landed': S.RETURN_CONFIRMED, ABORTED_OUT: S.ABORTED, PAUSE_OUT: S.PAUSED},
     S.PAUSED: {**{resume_outcome(s): s for s in Paused.PAUSABLE},
-               RESUME_NEW_INTENT: S.HOVER_TEST,           # TEMPORARY: SEARCHING in Milestone 5
+               RESUME_NEW_INTENT: S.SEARCHING,
                ABORTED_OUT: S.ABORTED,
                RETURN_OUT: S.LANDING},                    # TEMPORARY: RETURNING in Milestone 8
     S.RETURN_CONFIRMED: {MISSION_COMPLETE: MISSION_COMPLETE},
@@ -698,6 +937,8 @@ def build_state_machine(ctx: MissionContext, io: MissionIO, cfg: MissionConfig,
                         clock) -> smach.StateMachine:
     """The mission state machine. Run it with run_mission() (or sm.execute()); stop it with
     sm.request_preempt()."""
+    if ctx.coverage is None and ctx.field_config is not None:
+        ctx.coverage = CoverageMap(ctx.field_config.bounds, cfg.coverage_cell_m)
     sm = smach.StateMachine(outcomes=[MISSION_COMPLETE, MISSION_ABORTED, PREEMPTED])
     with sm:
         for cls in STATE_CLASSES:

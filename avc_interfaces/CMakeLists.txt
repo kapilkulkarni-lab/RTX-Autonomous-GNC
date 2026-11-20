@@ -9,6 +9,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ColorCheck.msg"
   "msg/DiceMapEntry.msg"
   "msg/DiceMap.msg"
+  "msg/TargetRelative.msg"
+  "msg/Obstacle.msg"
+  "msg/ObstacleArray.msg"
+  "msg/PerceptionHeartbeat.msg"
+  "msg/MissionTarget.msg"
   DEPENDENCIES std_msgs geometry_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

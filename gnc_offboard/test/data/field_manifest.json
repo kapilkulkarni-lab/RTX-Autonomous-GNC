@@ -1,0 +1,15 @@
+{
+  "world_name": "test_field",
+  "frame": "ENU, origin at field centre, +x east, +y north, metres",
+  "field": {"width_m": 13.716, "length_m": 13.716, "bounds": [-6.858, -6.858, 6.858, 6.858]},
+  "start_zone": {"corner": "sw", "bounds": [-6.858, -6.858, -5.334, -5.334], "center": [-6.096, -6.096]},
+  "px4_spawn_pose": "-6.096,-6.096,0.2,0,0,0.785",
+  "obstacles": [],
+  "targets": [
+    {"name": "target_black", "color": "black", "x": -4.5, "y": -1.0, "yaw": 0.0},
+    {"name": "target_blue", "color": "blue", "x": -2.0, "y": 3.0, "yaw": 0.0},
+    {"name": "target_red", "color": "red", "x": 2.0, "y": 2.0, "yaw": 0.0},
+    {"name": "target_yellow", "color": "yellow", "x": 3.0, "y": -3.0, "yaw": 0.0}
+  ],
+  "scenario": {"initial_target": "red"}
+}

@@ -1,0 +1,12 @@
+# Field geometry for hardware flights (field_file:=<this file>). In sim the world manifest is
+# used instead, so the field follows start_sim.sh's generated world.
+# Field frame: ENU, origin at the field center, +x east, +y north, meters.
+# Every value below is a placeholder (TBD) until measured at the venue / in the lab.
+field:
+  bounds: [-6.858, -6.858, 6.858, 6.858]   # TBD: x0, y0, x1, y1 (15 x 15 yd field)
+start_zone:
+  bounds: [-6.858, -6.858, -5.334, -5.334] # TBD: 5 x 5 ft, which corner on the day
+  center: [-6.096, -6.096]                 # TBD
+# Where PX4's local NED origin sits in the field frame: the EKF origin (spawn point) without
+# mocap, the mocap origin with mocap. TBD per setup. PX4 north is assumed to be field +y.
+px4_origin: [-6.096, -6.096]               # TBD

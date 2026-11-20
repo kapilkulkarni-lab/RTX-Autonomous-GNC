@@ -464,7 +464,7 @@ def avoid_obstacles(path, start, obstacles, clearance, area):
 
 # ------------------------------------------------------------------ 4. frontier
 def frontier(area, start, fp, pad=0.0, cell=0.5, obstacles=(), clearance=0.5,
-             goal=0.995, max_legs=400):
+             goal=0.995, max_legs=400, seen=None):
     """Greedy frontier search on a coverage grid.
 
     The field is cut into `cell`-sized squares. A square is "seen" once the camera
@@ -475,7 +475,11 @@ def frontier(area, start, fp, pad=0.0, cell=0.5, obstacles=(), clearance=0.5,
 
     Offline version: it assumes the map fills in exactly as predicted. On the real UAV the
     same idea runs online, updating "seen" from the camera.
+
+    `seen(x, y) -> bool` (optional) marks ground already covered before planning (e.g. the
+    mission's coverage memory), so the path skips it. All seen: returns [].
     """
+    already_seen = seen               # the local grid below reuses the name `seen`
     if not math.isfinite(cell) or cell <= 0:
         raise ValueError('cell must be positive and finite')
     if not math.isfinite(goal) or not 0 < goal <= 1:
@@ -505,6 +509,11 @@ def frontier(area, start, fp, pad=0.0, cell=0.5, obstacles=(), clearance=0.5,
             c = center(i, j)
             if any(_dist(c, (ox, oy)) <= r for ox, oy, r in obstacles):
                 set_seen(i, j)
+    if already_seen is not None:      # ground covered before this plan
+        for j in range(ny):
+            for i in range(nx):
+                if already_seen(*center(i, j)):
+                    set_seen(i, j)
     free_total = state['unseen']
 
     def mark(p):

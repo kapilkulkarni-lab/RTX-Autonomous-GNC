@@ -21,14 +21,31 @@ class MissionConfig:
     require_pilot_arm: bool
     search_altitude_m: float
     altitude_tol_m: float
-    hover_test_s: float               # TEMPORARY (Milestone 3)
     landed_disarm_grace_s: float
     pose_invalid_s: float
+    perception_stale_s: float
+    require_perception: bool
     px4_status_stale_s: float
     battery_return_pct: float
     force_return_at_s: float
     land_after_hold_s: float
     px4_discovery_timeout_s: float
+    field_file: str
+    search_pattern: str
+    detect_fov_deg: float
+    search_overlap: float
+    coverage_cell_m: float
+    wall_margin_m: float
+    obstacle_clearance_m: float
+    cruise_speed_mps: float
+    max_accel_mps2: float
+    acceptance_radius_m: float
+    hover_height_m: float
+    target_lost_s: float
+    color_confirm_timeout_s: float
+    approach_center_tol_m: float
+    die_match_radius_m: float
+    target_hover_s: float             # TEMPORARY (Milestone 5; DESCENDING in Milestone 6)
 
     @classmethod
     def names(cls):
@@ -47,8 +64,14 @@ class MissionConfig:
                 if not isinstance(v, bool):
                     raise ValueError(f'{f.name} must be true or false, got {v!r}')
                 typed[f.name] = v
+            elif f.type is str:
+                typed[f.name] = str(v)
             else:
                 typed[f.name] = float(v)
+        from gnc_offboard.mission.search import PATTERNS
+        if typed['search_pattern'] not in PATTERNS:
+            raise ValueError(f'search_pattern must be one of {PATTERNS}, '
+                             f'got {typed["search_pattern"]!r}')
         return cls(**typed)
 
 
