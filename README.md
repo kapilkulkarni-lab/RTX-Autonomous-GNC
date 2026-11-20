@@ -12,7 +12,7 @@ Simulation and offboard-control stack for the GNC team (path planning and drone 
 | `doctor.sh` | Health check. Run it while the sim is up and it reports what's working and what isn't: builds, processes, agent count, and whether ROS 2 can see PX4's topics. |
 | `gnc_env.sh` | Loads ROS 2, the workspace and the venv in the right order. You normally just type `gnc`. |
 | `generate_avc_world.py` | Builds a random AVC field (15×15 yd, start zone, dice, obstacles 5 ft apart) plus a JSON manifest of ground truth. |
-| `gnc_offboard/` | ROS 2 package: `frames.py` (field ENU ↔ PX4 NED, tested), `trajectory.py` (time-defined smoothstep cubic guidance, GNC Notes 5.5, tested) and `mission_demo` (take off → target die → start zone → land). Guidance defaults to `cubic`; `-p guidance:=carrot` gives the old constant-speed setpoint. See `docs/cubic_vs_carrot.png`. |
+| `gnc_offboard/` | ROS 2 package: `frames.py` (field ENU ↔ PX4 NED, tested), `trajectory.py` (time-defined smoothstep cubic guidance, GNC Notes 5.5, tested) `mission_manager` (the mission state machine, see [Flying mission_manager](#flying-mission_manager-sitl)), `guidance/px4_interface.py` (arming, offboard handshake, setpoints) and the search-pattern executables (`search_base.py`). Waypoint guidance defaults to `cubic`; `-p guidance:=carrot` gives the old constant-speed setpoint. See `docs/cubic_vs_carrot.png`. |
 | `tools/plot_field.py` | Draws the field from the manifest; with `--waypoints` or `--path`, checks a path against inflated obstacles and marks violations. |
 | `tools/plot_flight.py` | Plots a PX4 flight log (newest by default) on the field: path, altitude, speed, tracking error. Compare up to 3 logs. |
 | `requirements-gnc.txt` | Python packages for the venv (numpy pinned below 2 for ROS 2 Jazzy). |
@@ -83,11 +83,10 @@ ros2 interface show avc_msgs/msg/MissionState
 ~/dev/avc-gnc/start_sim.sh stop         # shut everything down
 gz sim -g                               # open the Gazebo window on a headless sim
 ```
-Once PX4's pane settles, fly the demo from the dev pane (bottom right):
-```bash
-ros2 run gnc_offboard mission_demo
-ros2 run gnc_offboard mission_demo --ros-args -p altitude:=2.0 -p waypoints:="[0.0, 0.0, 3.0, -2.0]"
-```
+Once PX4's pane settles, fly from the dev pane (bottom right): `ros2 run gnc_offboard mission_manager`,
+then start it with a `retrieve` intent (full steps in [Flying mission_manager](#flying-mission_manager-sitl)).
+To fly a fixed search pattern instead: `ros2 run gnc_offboard mission_lawnmower` (see
+[Comparing fixed search patterns](#comparing-fixed-search-patterns)).
 Quick manual test in the PX4 pane: `commander takeoff`, then `commander land`.
 
 **tmux keys:** Ctrl+b then an arrow key switches panes, Ctrl+b z zooms a pane, Ctrl+b d detaches (`tmux attach -t avc` to return). For mouse support: `echo 'set -g mouse on' >> ~/.tmux.conf`.
@@ -141,7 +140,7 @@ for the current terminal. RViz is not required.
 4. **Run the mission in the simulator's bottom-right dev pane:**
 
    ```bash
-   ros2 run gnc_offboard mission_demo
+   ros2 run gnc_offboard mission_lawnmower
    ```
 
    Gazebo displays **cyan = current camera footprint** and **orange = searched
@@ -366,12 +365,40 @@ The same pieces are importable for planner work: `gnc_offboard.field_map.FieldMa
 plus 0.15 m margin). Flight logs live in `~/dev/PX4-Autopilot/build/px4_sitl_default/rootfs/log/`;
 copy ones worth keeping somewhere safe, since `make distclean` deletes them.
 
+## Flying mission_manager (SITL)
+
+`mission_manager` is the one node that flies the mission (spec: `docs/mission_manager_outline.md`).
+Milestone 3 flies: STANDBY → PREFLIGHT → TAKEOFF → HOVER_TEST → LANDING → RETURN_CONFIRMED, plus
+ABORTED. HOVER_TEST (hover `hover_test_s`, then land in place) is **temporary** until SEARCHING
+exists. Parameters live in `gnc_offboard/config/mission.yaml`; override any with `-p name:=value`.
+
+1. Start the sim (Gazebo + PX4 + XRCE agent + dev pane): `~/dev/avc-gnc/start_sim.sh -H`.
+   Wait until PX4's pane says it is ready. If arming is denied for manual control, run
+   `param set COM_RC_IN_MODE 4` in the PX4 pane.
+2. In the dev pane: `ros2 run gnc_offboard mission_manager`. It waits in STANDBY.
+3. In another terminal (`gnc` first), watch the state:
+   ```bash
+   ros2 topic echo /mission/state --qos-reliability reliable --qos-durability transient_local
+   ```
+4. Start the mission with a `retrieve` intent (a new `intent_id` each time):
+   ```bash
+   ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent "{intent_id: 1, action: retrieve, target_color: blue}"
+   ```
+5. To abort at any point (hover, then land in place):
+   ```bash
+   ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent "{intent_id: 2, action: abort}"
+   ```
+
+`require_pilot_arm:=true` makes PREFLIGHT wait for the pilot to arm (GNC never sends arm); use it
+on hardware. After RETURN_CONFIRMED or ABORTED the node keeps publishing its final state; Ctrl+C
+to exit.
+
 ## Conventions (read before writing planner code)
 
 - **Frames.** The field frame is ENU with the origin at the field center (+x east, +y north). PX4 local is NED with the origin at the spawn point. Convert only through `gnc_offboard/frames.py`, never by hand.
 - **State input.** Use `/fmu/out/vehicle_odometry` or `vehicle_local_position` in the local frame. Never use lat/lon: GPS is banned at competition, and when perception's VIO replaces sim GPS, local-frame code keeps working unchanged.
-- **Topic names.** Some PX4 topics carry version suffixes (`_v1`). `mission_demo` detects this automatically; copy its `resolve()` helper.
-- **QoS.** PX4 topics need BEST_EFFORT + TRANSIENT_LOCAL, or subscribers silently get nothing. Use `PX4_QOS` from `mission_demo.py`.
+- **Topic names.** Some PX4 topics carry version suffixes (`_v1`). Use `resolve_topic()` (or `Px4Interface`) from `gnc_offboard/guidance/px4_interface.py`.
+- **QoS.** PX4 topics need BEST_EFFORT + TRANSIENT_LOCAL, or subscribers silently get nothing. Use `qos.PX4` from `gnc_offboard/mission/qos.py` (every QoS profile lives there).
 - **Venv.** The venv is for your Python scripts and nodes. Deactivate it before `colcon build`.
 
 ## Troubleshooting
@@ -381,7 +408,7 @@ copy ones worth keeping somewhere safe, since `make distclean` deletes them.
 | Anything not working | Run `./doctor.sh` while the sim is up, and start with the first `[FAIL]` line. |
 | `The term '...' is not recognized` (PowerShell-style error) | You're in PowerShell. Type `wsl` or open the Ubuntu terminal. |
 | `Unable to find or download file` from `gz sim` | Wrong path to the world. Use `start_sim.sh`, which handles it. |
-| `mission_demo`: "No PX4 topics after 20 s" | `./start_sim.sh stop`, then start again. If it persists, run `wsl --shutdown` in PowerShell and relaunch. |
+| `mission_manager` or a search mission: "No PX4 topics after 20 s" | `./start_sim.sh stop`, then start again. If it persists, run `wsl --shutdown` in PowerShell and relaunch. |
 | PX4 hangs at "waiting for Gazebo world" | World name mismatch or Gazebo not up yet. Run `start_sim.sh stop`, then start again. |
 | `Arming denied: manual control lost` | In the PX4 pane: `param set COM_RC_IN_MODE 4` |
 | apt: `Network is unreachable` mid-install | Network dropped. Rerun with `sudo`. If it repeats: `echo 'Acquire::ForceIPv4 "true";' \| sudo tee /etc/apt/apt.conf.d/99force-ipv4` |
@@ -408,7 +435,7 @@ in `searched_cell_centres`. Unshaded ground has no recorded coverage.
 
 ## Comparing fixed search patterns
 
-Six separate executables share `mission_demo`'s takeoff, guidance, and landing:
+Six separate executables share `search_base.WaypointMission`'s takeoff, guidance, and landing:
 `mission_lawnmower`, `mission_spiral_out`, `mission_spiral_in`, `mission_frontier`,
 `mission_zones`, and `mission_hybrid`. Each plans once before flight. Camera
 sightings never change the route or end the search early. Frontier predicts coverage

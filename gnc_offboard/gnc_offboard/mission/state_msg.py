@@ -27,14 +27,14 @@ class MissionStateBuilder:
               reason: str = '', active_target: str = '', mission_time_s: float = 0.0,
               last_intent_id: int = 0, last_intent_result: str = '',
               stamp_ns: int = 0) -> MissionState:
-        if state not in state_names.ALL:
+        if state not in state_names.PUBLISHABLE:
             raise ValueError(f'unknown state {state!r}')
         if state == state_names.PAUSED:
             # While paused, previous_state is the state the pause came from.
-            if paused_from not in state_names.ALL or paused_from == state_names.PAUSED:
+            if paused_from not in state_names.PUBLISHABLE or paused_from == state_names.PAUSED:
                 raise ValueError(f'PAUSED needs a valid paused_from, got {paused_from!r}')
             previous_state = paused_from
-        elif previous_state and previous_state not in state_names.ALL:
+        elif previous_state and previous_state not in state_names.PUBLISHABLE:
             raise ValueError(f'unknown previous_state {previous_state!r}')
         if last_intent_result not in _RESULTS:
             raise ValueError(f'last_intent_result must be one of {_RESULTS}, got {last_intent_result!r}')

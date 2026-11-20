@@ -35,3 +35,15 @@ ON_DIE = frozenset({NFC_READY, READING, RETRIEVING})
 
 # Terminal states: no pause, and every intent except abort is rejected after them.
 END_STATES = frozenset({RETURN_CONFIRMED, ABORTED})
+
+# TEMPORARY (Milestone 3 only; replaced by SEARCHING in Milestone 5): hover after TAKEOFF for
+# hover_test_s, then LAND in place. Published honestly on /mission/state; kept out of ALL.
+HOVER_TEST = 'HOVER_TEST'
+TEMPORARY = (HOVER_TEST,)
+
+# Every name the state machine may publish right now.
+PUBLISHABLE = ALL + TEMPORARY
+
+# Flying (not on the ground or on the die). HOVER_TEST is airborne while it exists.
+AIRBORNE = frozenset({TAKEOFF, SEARCHING, APPROACHING, DESCENDING, LIFTOFF, RETURNING, LANDING,
+                      HOVER_TEST})

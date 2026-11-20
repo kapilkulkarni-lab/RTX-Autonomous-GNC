@@ -48,7 +48,8 @@ MISSION_STATE = _profile(_RELIABLE, _TRANSIENT_LOCAL, 1)
 NFC_RESULT = _profile(_RELIABLE, _TRANSIENT_LOCAL, 10)
 
 # /fmu/in/* and /fmu/out/* (PX4 uXRCE-DDS): best effort. Durability and depth are not in the
-# table; transient local, keep last 1 is what PX4's bridge needs and what mission_demo.py uses.
+# table; transient local, keep last 1 is what PX4's uXRCE-DDS bridge needs (also used by
+# guidance/px4_interface.py, search_base.py and camera_fov.py).
 PX4 = _profile(_BEST_EFFORT, _TRANSIENT_LOCAL, 1)
 
 

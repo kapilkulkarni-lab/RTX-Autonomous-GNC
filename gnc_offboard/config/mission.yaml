@@ -1,0 +1,40 @@
+# mission_manager parameters (outline: Config and thresholds). This file is the single source of
+# the numbers: the node reads it (installed copy) as its parameter defaults, and
+# `--ros-args -p name:=value` or `--params-file` still override it.
+# Placeholders are starting guesses for sim only, not agreed numbers. Only the parameters the
+# current milestone uses are listed; later milestones add theirs.
+mission_manager:
+  ros__parameters:
+    # Rates
+    loop_hz: 20.0                 # state machine loop
+    setpoint_hz: 20.0             # offboard heartbeat + setpoint stream to PX4
+    state_pub_hz: 5.0             # /mission/state (also published on every change)
+
+    # PREFLIGHT
+    ekf_stable_s: 2.0             # TBD: position valid this long before arming
+    arm_timeout_s: 10.0           # TBD: arming + offboard must succeed within this
+    offboard_warmup_s: 1.0        # setpoints streamed this long before requesting offboard
+    cmd_retry_s: 1.0              # resend arm / offboard / land commands this often
+    require_pilot_arm: false      # true: never send arm; wait for the pilot to arm (false in SITL)
+
+    # TAKEOFF
+    search_altitude_m: 1.5        # TBD: above the start position
+    altitude_tol_m: 0.15          # TBD
+
+    # HOVER_TEST (TEMPORARY, Milestone 3 only; replaced by SEARCHING in Milestone 5)
+    hover_test_s: 5.0
+
+    # LANDING
+    landed_disarm_grace_s: 0.5    # disarm seen before PX4's landed flag: wait this long for it
+
+    # Global checks
+    pose_invalid_s: 1.0           # TBD: position invalid or stale this long -> ABORTED
+    px4_status_stale_s: 1.0       # TBD: no vehicle_status this long while airborne -> ABORTED
+    battery_return_pct: 30.0      # TBD: below this -> return
+    force_return_at_s: 360.0      # TBD: mission clock past this -> return (limit is 420 s)
+
+    # ABORTED
+    land_after_hold_s: 3.0        # TBD: hover this long, then land in place
+
+    # Startup
+    px4_discovery_timeout_s: 20.0 # give up if no PX4 topics appear

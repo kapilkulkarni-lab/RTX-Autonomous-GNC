@@ -31,7 +31,7 @@ def wrap_pi(angle):
 
 
 class CubicSegment:
-    """One rest-to-rest segment. Works in any frame; mission_demo feeds it PX4 NED."""
+    """One rest-to-rest segment. Works in any frame; search_base.WaypointMission feeds it PX4 NED."""
 
     def __init__(self, p0, p1, t_start, v_max, a_max, yaw0=None, yaw1=None):
         self.p0 = [float(v) for v in p0]

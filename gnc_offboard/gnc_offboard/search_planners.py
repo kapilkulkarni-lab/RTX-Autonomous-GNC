@@ -8,7 +8,7 @@ Convert to PX4 NED only through gnc_offboard/frames.py (done in search_base.py).
 
 Every planner returns a list of (x, y) waypoints that does NOT include the start point.
 Waypoints are kept sparse on purpose: only corners where the direction changes. The cubic
-guidance in mission_demo slows to a stop at each waypoint, so extra points cost time.
+guidance in search_base.WaypointMission slows to a stop at each waypoint, so extra points cost time.
 
 Patterns (numbers match Search_Pattern_Options.pdf):
     1 lawnmower          parallel rows across the field

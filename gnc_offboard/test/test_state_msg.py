@@ -89,3 +89,10 @@ def test_stamp_and_other_fields():
     assert (msg.header.stamp.sec, msg.header.stamp.nanosec) == (3, 250_000_001)
     assert msg.active_target == 'blue'
     assert msg.mission_time_s == pytest.approx(12.5)
+
+
+def test_temporary_hover_test_is_publishable():
+    b = MissionStateBuilder()
+    msg = b.build(state=S.HOVER_TEST, previous_state=S.TAKEOFF)
+    assert msg.state == 'HOVER_TEST'
+    assert b.build(state=S.LANDING, previous_state=S.HOVER_TEST).previous_state == 'HOVER_TEST'

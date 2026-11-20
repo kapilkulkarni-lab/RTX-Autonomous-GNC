@@ -10,7 +10,7 @@ pytest.importorskip('px4_msgs.msg')
 import rclpy
 from gnc_offboard import search_planners as sp
 from gnc_offboard import search_regions as sr
-from gnc_offboard.mission_demo import run_mission
+from gnc_offboard.search_base import WaypointMission, run
 
 MISSIONS = [('lawnmower', 'LawnmowerMission'), ('spiral_in', 'SpiralInMission'),
             ('spiral_out', 'SpiralOutMission'), ('frontier', 'FrontierMission'),
@@ -31,9 +31,11 @@ def test_mission_builds_fixed_path_and_flight_io(name, cls):
             assert node.area.contains((x, y))
             assert z == node.alt
         assert original[-1] == node.frame.to_ned(*node.start_xy, node.alt)
+        assert node.get_name() == 'mission_' + node.PATTERN
         node.setup_io()
         assert len(list(node.timers)) == 1
         assert len(list(node.subscriptions)) == 2
+        assert len(list(node.publishers)) >= 3    # offboard mode, setpoint, vehicle command
         assert all('camera' not in sub.topic_name for sub in node.subscriptions)
         assert node.waypoints == original
     finally:
@@ -43,16 +45,31 @@ def test_mission_builds_fixed_path_and_flight_io(name, cls):
 
 
 def test_shared_runner_sets_up_io_before_spinning():
-    with patch('gnc_offboard.mission_demo.rclpy') as ros:
-        with patch('gnc_offboard.mission_demo.MissionDemo') as factory:
+    with patch('gnc_offboard.search_base.rclpy') as ros, \
+            patch('gnc_offboard.search_base.px4.wait_for_px4', return_value=True) as wait:
+        with patch('gnc_offboard.search_base.WaypointMission') as factory:
             node = factory.return_value
-            node.get_topic_names_and_types.return_value = [
-                ('/fmu/out/vehicle_local_position_v1', [])]
             ros.spin.side_effect = KeyboardInterrupt
-            run_mission(factory, args=['--ros-args'])
+            run(factory, args=['--ros-args'])
+            wait.assert_called_once_with(node, timeout_s=20.0)
             node.setup_io.assert_called_once()
             ros.spin.assert_called_once_with(node)
             node.destroy_node.assert_called_once()
+
+
+def test_shared_runner_gives_up_without_px4():
+    with patch('gnc_offboard.search_base.rclpy') as ros, \
+            patch('gnc_offboard.search_base.px4.wait_for_px4', return_value=False):
+        with patch('gnc_offboard.search_base.WaypointMission') as factory:
+            run(factory)
+            factory.return_value.setup_io.assert_not_called()
+            ros.spin.assert_not_called()
+
+
+def test_search_missions_are_waypoint_missions_with_their_own_node_names():
+    for name, cls in MISSIONS:
+        mission_cls = getattr(importlib.import_module('gnc_offboard.mission_' + name), cls)
+        assert issubclass(mission_cls, WaypointMission)
 
 
 @pytest.mark.parametrize('start', [(-6, -6), (6, -6), (-6, 6), (6, 6)])

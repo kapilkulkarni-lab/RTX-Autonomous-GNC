@@ -6,6 +6,9 @@ from avc_msgs.msg import MissionState
 from gnc_offboard.mission import state_names as S
 
 MISSION_DIR = Path(S.__file__).parent
+# Packages that may not hard-code a mission state name. (search_base.WaypointMission has its
+# own unrelated internal states.)
+CHECKED_DIRS = [MISSION_DIR, MISSION_DIR.parent / 'ros']
 
 
 def test_fifteen_unique_states():
@@ -30,10 +33,17 @@ def test_groups():
     assert S.END_STATES == {S.RETURN_CONFIRMED, S.ABORTED}
 
 
+def test_temporary_hover_test_kept_out_of_all():
+    assert S.HOVER_TEST == 'HOVER_TEST'
+    assert S.HOVER_TEST not in S.ALL
+    assert S.PUBLISHABLE == S.ALL + (S.HOVER_TEST,)
+    assert S.HOVER_TEST in S.AIRBORNE
+
+
 def test_no_other_module_hard_codes_a_state_name():
-    names = set(S.ALL)
+    names = set(S.PUBLISHABLE)
     offenders = []
-    for path in MISSION_DIR.glob('*.py'):
+    for path in (p for d in CHECKED_DIRS for p in d.glob('*.py')):
         if path.name == 'state_names.py':
             continue
         for node in ast.walk(ast.parse(path.read_text())):

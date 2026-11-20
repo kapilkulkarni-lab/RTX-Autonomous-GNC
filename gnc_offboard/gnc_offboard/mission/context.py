@@ -4,10 +4,11 @@ The node's subscription callbacks only call `update_input()` (store the whole la
 its receive time; no decisions). States read a consistent `Inputs` snapshot and change mission
 fields under the lock. Nothing here imports rclpy.
 """
+import collections
 import dataclasses
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 # Field names of Inputs, one per subscribed topic.
 INPUT_NAMES = (
@@ -84,6 +85,11 @@ class MissionContext:
     state: str = ''
     previous_state: str = ''
     reason: str = ''
+    pending_reason: str = ''                 # set by a state with its outcome; used on transition
+    abort_cause: str = ''                    # an AbortCause value, set when ABORTED is chosen
+    abort_from: str = ''                     # the state ABORTED was entered from
+    offboard_engaged: bool = False           # PX4 reached armed + offboard at least once
+    pose_bad_since: Optional[float] = None   # position invalid or stale since (global check)
     paused_from: str = ''
     stored_intent: Optional[Stamped] = None  # newest intent received while PAUSED
     after_liftoff: str = ''                  # where LIFTOFF goes next
@@ -95,9 +101,11 @@ class MissionContext:
     redescended: bool = False                # both motor stages failed once already
 
     # Commands.
-    setpoint: Optional[Any] = None           # streamed to PX4 by the node at setpoint_hz
+    setpoint: Optional[Tuple[float, float, float, float]] = None  # PX4 NED x, y, z, yaw; None = no stream
 
-    # Intents.
+    # Intents. Every message on /mission/intent is a new intent, so they queue (never dropped,
+    # never ordered by intent_id) as well as being stored as the latest input.
+    intent_queue: Deque[Stamped] = field(default_factory=collections.deque)
     last_intent_id: int = 0
     last_intent_result: str = ''
 
@@ -114,6 +122,15 @@ class MissionContext:
         stamped = Stamped(msg, now)
         with self.lock:
             self._inputs[name] = stamped
+            if name == 'intent':
+                self.intent_queue.append(stamped)
+
+    def take_intents(self) -> List[Stamped]:
+        """Remove and return every intent received since the last call, oldest first."""
+        with self.lock:
+            intents = list(self.intent_queue)
+            self.intent_queue.clear()
+            return intents
 
     def snapshot(self) -> Inputs:
         """A consistent copy of the latest inputs, safe to use outside the lock."""

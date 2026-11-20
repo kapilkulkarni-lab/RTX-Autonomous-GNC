@@ -138,5 +138,5 @@ cat <<EOF
 All set. Open a NEW terminal, then:
   gnc                          dev shell (ROS 2 + workspace + venv)
   $REPO/start_sim.sh           Gazebo + PX4 + agent + dev shell in tmux  (-H = no window)
-  ros2 run gnc_offboard mission_demo   (in the dev pane, once PX4 says Ready)
+  ros2 run gnc_offboard mission_manager   (in the dev pane, once PX4 says Ready; README: Flying mission_manager)
 EOF

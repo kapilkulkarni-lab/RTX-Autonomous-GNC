@@ -35,7 +35,7 @@ def latest_ulog(directory=None):
         raise FileNotFoundError(
             f'no flight logs (.ulg) found under {root}\n'
             'PX4 only writes a log while the drone is armed, so fly once first (e.g. '
-            'ros2 run gnc_offboard mission_demo until "Landed and disarmed"), then rerun.\n'
+            'ros2 run gnc_offboard mission_manager until it reaches RETURN_CONFIRMED), then rerun.\n'
             'A rebuild or `make distclean` also deletes old logs. Or pass a .ulg path directly.')
     return logs[-1]
 

@@ -20,7 +20,7 @@ from px4_msgs.msg import VehicleOdometry
 from gnc_offboard.camera_model import CameraModel, CoverageGrid, contains_point
 from gnc_offboard.coverage_colors import DARKEST_AT_S, sensing_color
 from gnc_offboard.frames import FieldFrame
-from gnc_offboard.mission_demo import PX4_QOS
+from gnc_offboard.mission.qos import PX4 as PX4_QOS
 
 
 ODOMETRY_FRESH_S = 1.0
