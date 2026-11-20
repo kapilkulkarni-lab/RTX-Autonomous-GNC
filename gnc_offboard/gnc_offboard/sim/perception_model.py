@@ -1,13 +1,14 @@
-"""What a stand-in Perception reports, given what the camera can see. Pure (no ROS), so the
-fake_dice_map node and the tests share it. Field frame (ENU, meters); ground at z = 0.
+"""What a stand-in Perception reports, given what the cameras can see. Pure (no ROS), so the
+camera_fov sim node and the tests share it. Field frame (ENU, meters); ground at z = 0.
 
-  dice map         every die that has been inside the detection footprint, with the color
+  dice map         every die that has been inside either camera's footprint, with the color
                    Perception believes (true color, or `wrong_color_first` for the first die
                    seen, until a close look confirms the true color and corrects the map)
-  target_relative  the in-view die nearest the mission's target centroid, relative to the drone
-  color check      a confirmed color only for the die nearest straight below, when it is within
-                   confirm_radius_m horizontally and the drone is no higher than
-                   confirm_max_alt_m
+  target_relative  the die in the down camera's view nearest the mission's target centroid,
+                   relative to the drone
+  color check      a confirmed color (down camera only) for the die nearest straight below,
+                   when it is within confirm_radius_m horizontally and the drone is no higher
+                   than confirm_max_alt_m
   drop             no detections at all (no map updates, target_relative or color)
 """
 import math
@@ -48,12 +49,17 @@ class PerceptionModel:
         return cls(dice, **kwargs)
 
     def update(self, drone: Sequence[float], in_view: Callable[[float, float], bool],
-               target_xy: Optional[Sequence[float]] = None, drop: bool = False
+               target_xy: Optional[Sequence[float]] = None, drop: bool = False,
+               close_view: Optional[Callable[[float, float], bool]] = None
                ) -> PerceptionOutput:
+        """`in_view`: either camera (dice map). `close_view`: the down camera, used for
+        target_relative and the color check (default: `in_view`)."""
         out = PerceptionOutput()
+        close_view = close_view or in_view
         if not drop:
-            visible = [i for i, d in enumerate(self.dice) if in_view(d.x, d.y)]
-            for i in visible:
+            seen = [i for i, d in enumerate(self.dice) if in_view(d.x, d.y)]
+            visible = [i for i, d in enumerate(self.dice) if close_view(d.x, d.y)]
+            for i in seen:
                 if i not in self.reported:
                     first = not self.reported
                     self.reported[i] = (self.wrong_color_first

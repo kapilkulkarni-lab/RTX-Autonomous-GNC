@@ -16,6 +16,7 @@ from gnc_offboard.mission.io import FakeIO  # noqa: E402
 
 CONFIG_YAML = Path(__file__).resolve().parents[1] / 'config' / 'mission.yaml'
 TEST_MANIFEST = Path(__file__).resolve().parent / 'data' / 'field_manifest.json'
+CAMERAS_YAML = Path(__file__).resolve().parents[1] / 'config' / 'cameras.yaml'
 
 ARMED, DISARMED = VehicleStatus.ARMING_STATE_ARMED, VehicleStatus.ARMING_STATE_DISARMED
 OFFBOARD = VehicleStatus.NAVIGATION_STATE_OFFBOARD
@@ -81,12 +82,26 @@ def field_config():
 
 
 @pytest.fixture
-def ctx(field_config, cfg):
-    from gnc_offboard.mission.coverage import CoverageMap
+def cameras():
+    from gnc_offboard.mission.cameras import load_cameras
+    return load_cameras(CAMERAS_YAML)
+
+
+@pytest.fixture
+def ctx(field_config, cfg, cameras):
+    from gnc_offboard.camera_model import CoverageGrid
     c = MissionContext()
     c.field_config = field_config
-    c.coverage = CoverageMap(field_config.bounds, cfg.coverage_cell_m)
+    c.coverage = CoverageGrid(field_config.bounds, cfg.coverage_cell_m)
+    c.cameras = cameras
     return c
+
+
+def odometry(x=0.0, y=0.0, z=0.0, yaw=0.0):
+    """VehicleOdometry-like: PX4 NED position and a level attitude with heading yaw."""
+    import math
+    return SimpleNamespace(position=[x, y, z],
+                           q=[math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
 
 
 @pytest.fixture
@@ -144,6 +159,7 @@ class FakePx4:
         self.accept_disarm = True
         self.armed, self.nav, self.z, self.landed = False, POSCTL, 0.0, True
         self.x = self.y = 0.0
+        self.yaw = 0.0
         self.speed = 3.0                  # m/s horizontal limit (setpoints move slower)
         self.landed_at = None
         self.seen = 0
@@ -168,6 +184,7 @@ class FakePx4:
         self.seen = len(self.io.calls)
         if self.armed and self.nav == OFFBOARD and self.io.setpoint is not None:
             tx, ty, target = self.io.setpoint[:3]
+            self.yaw = self.io.setpoint[3]
             step = max(-self.climb * dt, min(self.climb * dt, target - self.z))
             self.z += step
             dx, dy = tx - self.x, ty - self.y
@@ -187,6 +204,7 @@ class FakePx4:
     def publish(self, now):
         self.ctx.update_input('vehicle_status', status(self.armed, self.nav), now)
         self.ctx.update_input('local_position', position(self.x, self.y, self.z), now)
+        self.ctx.update_input('odometry', odometry(self.x, self.y, self.z, self.yaw), now)
         self.ctx.update_input('land_detected', land_detected(self.landed), now)
         self.ctx.update_input('battery_status', battery(0.9), now)
 
@@ -263,9 +281,9 @@ def transitions_of(io):
 
 class FakePerception:
     """Perception stand-in for full runs: the shared PerceptionModel (sim/perception_model.py)
-    with a nadir square footprint of footprint(height, detect_fov_deg). Publishes the dice map,
-    target_relative, color_check (only when confirmed) and the heartbeat into the context on
-    every tick. Switches: drop (no detections), beating (heartbeat on/off)."""
+    seeing through both cameras of config/cameras.yaml, projected from FakePx4's pose exactly as
+    camera_fov does (dice map: either camera; target_relative and color: down camera). Publishes
+    into the context on every tick. Switches: drop (no detections), beating (heartbeat)."""
 
     def __init__(self, ctx, px4, clock, cfg, manifest_path=TEST_MANIFEST, dice=None,
                  view_all=False, **model_kw):
@@ -289,15 +307,26 @@ class FakePerception:
         return (x, y, -self.px4.z)
 
     def tick(self, now):
+        from gnc_offboard.camera_model import contains_point
+        from gnc_offboard.mission.cameras import footprints
         drone = self.drone()
         if self.view_all:
-            view = lambda x, y: True  # noqa: E731
-        elif drone[2] > 0.1:
-            view = self.square_view(drone, self.sp.footprint(drone[2], self.cfg.detect_fov_deg))
+            view = close = lambda x, y: True  # noqa: E731
         else:
-            view = lambda x, y: False  # noqa: E731
+            pose = (self.px4.x, self.px4.y, self.px4.z, self.px4.yaw)
+            last = getattr(self, '_pose', None)
+            if last is None or max(abs(a - b) for a, b in zip(pose, last)) > 0.05:
+                odom = odometry(*pose)
+                self._polys = footprints(self.ctx.cameras, odom.position, odom.q,
+                                         self.ctx.field_config.frame,
+                                         self.ctx.field_config.bounds)
+                self._pose = pose
+            polys = self._polys
+            view = lambda x, y: any(contains_point(p, (x, y)) for p in polys.values())  # noqa: E731
+            close = lambda x, y: contains_point(polys['down'], (x, y))  # noqa: E731
         target = self.ctx.target_centroid
-        out = self.model.update(drone, view, target[:2] if target else None, drop=self.drop)
+        out = self.model.update(drone, view, target[:2] if target else None, drop=self.drop,
+                                close_view=close)
         up = self.ctx.update_input
         up('dice_map', SimpleNamespace(dice=[
             SimpleNamespace(color=c, centroid=SimpleNamespace(x=p[0], y=p[1], z=p[2]))

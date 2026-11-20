@@ -71,10 +71,18 @@ class CameraModel:
             n = rotation @ normal
             polygon = clip(polygon, n[:2], n[2]*(ground_z-origin[2]) - n[:2] @ origin[:2])
         radius = self.max_range_m * math.cos(math.pi/64)
-        for angle in np.arange(64)*2*math.pi/64:
-            n = -np.array([math.cos(angle), math.sin(angle)])
-            polygon = clip(polygon, n, radius - n @ origin[:2])
+        normals = -np.stack([np.cos(_RANGE_ANGLES), np.sin(_RANGE_ANGLES)], axis=1)
+        offsets = radius - normals @ origin[:2]
+        if len(polygon):
+            # Clipping only shrinks a convex polygon, so a range plane that no vertex violates
+            # now can never cut it later: clip by the violated planes only (same result).
+            violated = np.any(polygon @ normals.T + offsets < 0, axis=0)
+            for n, offset in zip(normals[violated], offsets[violated]):
+                polygon = clip(polygon, n, offset)
         return origin, polygon
+
+
+_RANGE_ANGLES = np.arange(64)*2*math.pi/64
 
 
 def clip(polygon, normal, offset):
@@ -123,19 +131,48 @@ class CoverageGrid:
         self.exposure_s = np.zeros_like(xx)
         self.in_view = np.zeros_like(self.searched)
 
-    def update(self, polygon, elapsed_s=0.0):
-        """Credit elapsed real time to the footprint held since the previous sample."""
-        self.exposure_s[self.in_view] += elapsed_s
+    def inside(self, polygon):
+        """Cells whose centres lie in a CCW polygon (empty polygon: none)."""
         if len(polygon) < 3:
-            self.in_view.fill(False)
-            return
+            return np.zeros_like(self.searched)
+        polygon = np.asarray(polygon, dtype=float)
         inside = self.valid.copy()
         for a, b in zip(polygon, np.roll(polygon, -1, axis=0)):
             d = b-a
             inside &= (d[0]*(self.centres[..., 1]-a[1])
                        - d[1]*(self.centres[..., 0]-a[0])) >= -1e-9
-        self.in_view = inside
-        self.searched |= inside
+        return inside
+
+    def update(self, polygon, elapsed_s=0.0):
+        """Credit elapsed real time to the footprint held since the previous sample."""
+        self.update_many([polygon], elapsed_s)
+
+    def update_many(self, polygons, elapsed_s=0.0):
+        """update() for several cameras at once: the view is the union of their footprints."""
+        self.exposure_s[self.in_view] += elapsed_s
+        view = np.zeros_like(self.searched)
+        for polygon in polygons:
+            view |= self.inside(polygon)
+        self.in_view = view
+        self.searched |= view
+
+    def mark(self, polygon):
+        """Mark a footprint as searched (no exposure or current-view bookkeeping)."""
+        self.searched |= self.inside(polygon)
+
+    def is_seen(self, x, y):
+        i = math.floor((x-self.bounds[0])/self.resolution)
+        j = math.floor((y-self.bounds[1])/self.resolution)
+        return 0 <= i < self.width and 0 <= j < self.height and bool(self.searched[j, i])
+
+    def clear(self):
+        self.searched.fill(False)
+        self.exposure_s.fill(0.0)
+        self.in_view.fill(False)
+
+    @property
+    def count(self):
+        return int(np.count_nonzero(self.searched))
 
     @property
     def area_m2(self):

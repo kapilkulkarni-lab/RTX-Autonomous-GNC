@@ -143,8 +143,8 @@ for the current terminal. RViz is not required.
    ros2 run gnc_offboard mission_lawnmower
    ```
 
-   Gazebo displays **cyan = current camera footprint** and **orange = searched
-   ground**. For a headless sim (`./start_sim.sh -H`), open its viewer from
+   Gazebo displays **cyan = down camera's current footprint**, **magenta = D455's
+   current footprint** and **orange = searched ground** (either camera). For a headless sim (`./start_sim.sh -H`), open its viewer from
    another terminal with `gz sim -g`.
 
 5. **After landing, press Ctrl+C in the camera terminal** to save the coverage
@@ -161,8 +161,9 @@ Paths below are relative to the repository root.
 
 | File | Purpose |
 |---|---|
-| `gnc_offboard/gnc_offboard/camera_model.py` | Camera geometry and **default camera configuration** in the `CameraModel` dataclass. Projects the view onto the ground and accumulates searched cells. Independent of ROS. |
-| `gnc_offboard/gnc_offboard/camera_fov.py` | ROS 2 observer node. Reads PX4 odometry, applies the camera model, handles live parameters, publishes coverage, draws Gazebo markers, and saves results. Does not send flight commands. |
+| `gnc_offboard/config/cameras.yaml` | **The one camera config**: the D455 (forward-tilted) and the down camera, as `CameraModel` parameters. Read by `camera_fov` and `mission_manager` (`cameras_file`). |
+| `gnc_offboard/gnc_offboard/camera_model.py` | Camera geometry in the `CameraModel` dataclass (its built-in defaults are only fallbacks). Projects the view onto the ground and accumulates searched cells (`CoverageGrid`, also the mission's coverage memory). Independent of ROS. |
+| `gnc_offboard/gnc_offboard/camera_fov.py` | ROS 2 sim node. Reads PX4 odometry, projects both cameras, handles live parameters, publishes coverage, draws Gazebo markers, saves results, and stands in for Perception (dice map, target_relative, color check, obstacles, heartbeat). Does not send flight commands. |
 | `gnc_offboard/gnc_offboard/coverage_plot.py` | Creates the north-up, bird's-eye PNG showing the full field and searched ground. |
 | `tools/plot_camera_coverage.py` | Command-line tool to regenerate a PNG from saved coverage JSON. |
 | `gnc_offboard/test/test_camera_model.py` | Tests projection geometry, attitude and mount transforms, clipping, coverage accumulation, and parameter validation. |
@@ -172,34 +173,31 @@ Paths below are relative to the repository root.
 
 ### Camera defaults and configuration before a run
 
-There is no dedicated camera YAML config file yet. The default geometry settings
-are in `camera_model.py`; startup/output defaults are in `camera_fov.py`.
+Camera geometry lives in **`gnc_offboard/config/cameras.yaml`**, one entry per camera
+(`d455`, `down`); edit it (and rebuild) to change both `camera_fov` and `mission_manager`.
+Startup/output defaults are in `camera_fov.py`.
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `hfov_deg` | `70.0` | Horizontal field of view, degrees |
-| `vfov_deg` | `50.0` | Vertical field of view, degrees |
-| `pitch_down_deg` | `45.0` | Camera pitch downward relative to the vehicle |
-| `forward_m` | `0.2` | Mount translation forward from vehicle origin, metres |
-| `right_m` | `0.0` | Mount translation right, metres |
-| `down_m` | `0.0` | Mount translation down, metres |
-| `yaw_right_deg` | `0.0` | Camera yaw right relative to the vehicle |
-| `roll_deg` | `0.0` | Camera roll, clockwise looking forward |
-| `max_range_m` | `30.0` | Maximum horizontal projection range, metres |
+| Parameter (per camera) | d455 | down | Meaning |
+|---|---|---|---|
+| `hfov_deg` | `90.0` | `120.0` (TBD) | Horizontal field of view, degrees |
+| `vfov_deg` | `65.0` | `120.0` (TBD) | Vertical field of view, degrees |
+| `pitch_down_deg` | `45.0` (TBD) | `90.0` | Camera pitch downward relative to the vehicle |
+| `forward_m`, `right_m`, `down_m` | `0.0` (TBD) | `0.0` (TBD) | Mount translation, body FRD, metres |
+| `yaw_right_deg`, `roll_deg` | `0.0` | `0.0` | Camera yaw right / roll, degrees |
+| `max_range_m` | `6.0` (TBD) | `6.0` (TBD) | Horizontal range Perception detects dice at, metres |
 
 Translations use vehicle body axes (forward, right, down). The model also applies
-the vehicle's actual roll, pitch and yaw from PX4 odometry. Override defaults at
-startup by replacing the camera command in quick-start step 3:
+the vehicle's actual roll, pitch and yaw from PX4 odometry. To try other geometry for one
+run, override per camera at startup (sim only; `mission_manager` keeps the file's values):
 
 ```bash
 gnc
 ros2 run gnc_offboard camera_fov --ros-args \
-  -p hfov_deg:=80.0 -p vfov_deg:=60.0 \
-  -p pitch_down_deg:=45.0 \
-  -p forward_m:=0.2 -p right_m:=0.0 -p down_m:=0.0
+  -p down.hfov_deg:=100.0 -p down.vfov_deg:=100.0 -p d455.pitch_down_deg:=35.0
 ```
 
-Other parameters must be set at startup: `resolution_m` (0.25 m grid),
+Other parameters must be set at startup: `cameras_file` ('' = installed cameras.yaml),
+`resolution_m` (0.25 m grid),
 `ground_z_m` (0 m field ENU), `manifest` (field manifest path),
 `output` (JSON output path; PNG uses the same stem),
 `odometry_topic` (`/fmu/out/vehicle_odometry`), and `gazebo_markers` (true).
@@ -214,26 +212,22 @@ ros2 run gnc_offboard camera_fov --ros-args \
 ### Inspect and edit settings during a run
 
 With `camera_fov` running, open another Ubuntu terminal. All geometry parameters
-in the table above can be changed live:
+in the table above can be changed live, per camera (`<camera>.<parameter>`), along with the
+Perception stand-in switches `drop_detections` and `heartbeat`:
 
 ```bash
 gnc
 ros2 param list /camera_fov
-ros2 param get /camera_fov hfov_deg
-ros2 param set /camera_fov hfov_deg 90.0
-ros2 param set /camera_fov vfov_deg 60.0
-ros2 param set /camera_fov pitch_down_deg 55.0
-ros2 param set /camera_fov forward_m 0.3
-ros2 param set /camera_fov right_m 0.1
-ros2 param set /camera_fov down_m 0.0
-ros2 param set /camera_fov yaw_right_deg 10.0
-ros2 param set /camera_fov roll_deg 0.0
-ros2 param set /camera_fov max_range_m 20.0
+ros2 param get /camera_fov down.hfov_deg
+ros2 param set /camera_fov down.hfov_deg 100.0
+ros2 param set /camera_fov d455.pitch_down_deg 55.0
+ros2 param set /camera_fov d455.max_range_m 8.0
+ros2 param set /camera_fov drop_detections true
 ```
 
 These changes affect subsequent observations; existing searched coverage is
-retained. Live changes do not modify the source defaults or persist after a
-restart. FOV values must be greater than 0 and less than 179 degrees. Restart the
+retained. Live changes affect `camera_fov` only, do not modify `cameras.yaml`, and do not
+persist after a restart. FOV values must be greater than 0 and less than 179 degrees. Restart the
 node to change grid/output settings or to begin with an empty coverage grid.
 
 ### Save and open the camera plot
@@ -377,10 +371,11 @@ comes from the world manifest; on hardware pass `-p field_file:=.../config/field
 1. Start the sim (Gazebo + PX4 + XRCE agent + dev pane): `~/dev/avc-gnc/start_sim.sh -H`.
    Wait until PX4's pane says it is ready. If arming is denied for manual control, run
    `param set COM_RC_IN_MODE 4` in the PX4 pane.
-2. Start the Perception stand-in (sim only; without it mission_manager aborts after takeoff on
-   the Perception heartbeat check, unless `-p require_perception:=false`):
+2. Start the camera node, which also stands in for Perception (sim only; without it
+   mission_manager aborts after takeoff on the Perception heartbeat check, unless
+   `-p require_perception:=false`):
    ```bash
-   ros2 run gnc_offboard fake_dice_map
+   ros2 run gnc_offboard camera_fov
    ```
    In the dev pane: `ros2 run gnc_offboard mission_manager`. It waits in STANDBY.
 3. In another terminal (`gnc` first), watch the state:
@@ -409,15 +404,16 @@ comes from the world manifest; on hardware pass `-p field_file:=.../config/field
    ```bash
    P='ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent'
    ros2 topic echo /mission/target --qos-reliability reliable --qos-durability transient_local
-   # Wrong color first: restart fake_dice_map so the first die seen is reported as the target color
-   ros2 run gnc_offboard fake_dice_map --ros-args -p wrong_color_first:=red
+   # Wrong color first: restart camera_fov so the first die seen is reported as the target color
+   ros2 run gnc_offboard camera_fov --ros-args -p wrong_color_first:=red
    # Retarget mid-search (while SEARCHING): unseen color -> SEARCHING, seen color -> APPROACHING
    $P "{intent_id: 10, action: retrieve, target_color: yellow}"
    # Perception dropout: detections off (APPROACHING -> SEARCHING: target lost), then heartbeat off (ABORTED)
-   ros2 param set /fake_dice_map drop_detections true
-   ros2 param set /fake_dice_map heartbeat false
+   ros2 param set /camera_fov drop_detections true
+   ros2 param set /camera_fov heartbeat false
    ```
-   Compare search patterns with `-p search_pattern:=lawnmower` (or `zone_sweep`; default `frontier`).
+   Compare search patterns with `-p search_pattern:=frontier` (or `zone_sweep`; default
+   `lawnmower`), saving each run's coverage with camera_fov's `output` parameter.
 
 `require_pilot_arm:=true` makes PREFLIGHT wait for the pilot to arm (GNC never sends arm); use it
 on hardware. After RETURN_CONFIRMED or ABORTED the node keeps publishing its final state; Ctrl+C

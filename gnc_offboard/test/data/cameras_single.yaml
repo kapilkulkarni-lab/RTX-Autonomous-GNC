@@ -1,0 +1,7 @@
+# Test cameras for test_camera_recording: the old single-camera geometry (CameraModel defaults)
+# in the d455 slot, and a pinhole-narrow down camera that sees no cell centre.
+cameras:
+  d455: {hfov_deg: 70.0, vfov_deg: 50.0, pitch_down_deg: 45.0, yaw_right_deg: 0.0, roll_deg: 0.0,
+         forward_m: 0.2, right_m: 0.0, down_m: 0.0, max_range_m: 30.0}
+  down: {hfov_deg: 0.5, vfov_deg: 0.5, pitch_down_deg: 90.0, yaw_right_deg: 0.0, roll_deg: 0.0,
+         forward_m: 0.0, right_m: 0.0, down_m: 0.0, max_range_m: 30.0}

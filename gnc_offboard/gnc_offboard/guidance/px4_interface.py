@@ -21,7 +21,8 @@ NAN3 = [float('nan')] * 3
 
 # PX4 topics this package uses (PX4 may add a version suffix such as _v1).
 PX4_OUT_TOPICS = ('/fmu/out/vehicle_status', '/fmu/out/vehicle_local_position',
-                  '/fmu/out/vehicle_land_detected', '/fmu/out/battery_status')
+                  '/fmu/out/vehicle_land_detected', '/fmu/out/battery_status',
+                  '/fmu/out/vehicle_odometry')
 PX4_IN_TOPICS = ('/fmu/in/offboard_control_mode', '/fmu/in/trajectory_setpoint',
                  '/fmu/in/vehicle_command')
 DISCOVERY_TOPIC = '/fmu/out/vehicle_local_position'

@@ -10,7 +10,8 @@ from conftest import (OFFBOARD, battery, flight, heartbeat, intent, land_detecte
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.mission_manager_smach import (
     ABORTED_OUT, MISSION_ABORTED, MISSION_COMPLETE, RETARGET_SEEN, RETARGET_UNSEEN,
-    TRANSITIONS, AbortCause, Approaching, Searching, Takeoff, TargetHover, build_state_machine)
+    TRANSITIONS, AbortCause, Approaching, Searching, Standby, Takeoff, TargetHover,
+    build_state_machine)
 from gnc_offboard.sim.perception_model import Die
 
 RED, BLACK, YELLOW = (2.0, 2.0), (-4.5, -1.0), (3.0, -3.0)     # test world (data/field_manifest.json)
@@ -244,7 +245,7 @@ def test_searching_target_found_while_flying(ctx, io, cfg, clock, feed):
 
 def test_searching_field_covered_clears_and_searches_again(ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock)
-    ctx.coverage.mark(0.0, 0.0, 20.0)
+    ctx.coverage.mark([[-10, -10], [10, -10], [10, 10], [-10, 10]])
     ctx.given_up_dice = [(1.0, 1.0, 0.0)]
     ctx.die_failures = [[(2.0, 2.0, 0.0), 1]]
     state = make(Searching, ctx, io, cfg, clock)
@@ -253,14 +254,34 @@ def test_searching_field_covered_clears_and_searches_again(ctx, io, cfg, clock, 
     assert 'request_state_publish' in io.names()
 
 
-def test_coverage_marked_only_while_airborne(ctx, io, cfg, clock, feed):
+def test_coverage_marked_from_both_cameras_only_while_airborne(ctx, io, cfg, clock, feed):
+    from conftest import odometry
     airborne(ctx, feed, clock)
+    feed.set(odometry=odometry(z=-2.5))
     make(Takeoff, ctx, io, cfg, clock).tick(clock.now())
-    assert ctx.coverage.count > 0
+    x, y = ctx.field_config.frame.to_field(0.0, 0.0)[:2]   # drone over the PX4 origin
+    assert ctx.coverage.is_seen(x, y)                      # down camera, below
+    assert ctx.coverage.is_seen(x, y + 5.0)                # D455, ahead (north at yaw 0)
+    seen = ctx.coverage.count
     ctx.coverage.clear()
-    feed.set(local_position=position(z=-0.05))          # on the ground
-    make(Takeoff, ctx, io, cfg, clock).tick(clock.now())
-    assert ctx.coverage.count == 0
+    make(Standby, ctx, io, cfg, clock).tick(clock.now())   # not airborne: nothing marked
+    assert ctx.coverage.count == 0 and seen > 0
+
+
+def test_coverage_not_reprojected_while_hovering(ctx, io, cfg, clock, feed, monkeypatch):
+    from conftest import odometry
+    import gnc_offboard.mission.mission_manager_smach as smach_mod
+    calls = []
+    real = smach_mod.footprints
+    monkeypatch.setattr(smach_mod, 'footprints', lambda *a: calls.append(1) or real(*a))
+    airborne(ctx, feed, clock)
+    feed.set(odometry=odometry(z=-2.5))
+    state = make(TargetHover, ctx, io, cfg, clock)
+    for _ in range(10):
+        state.tick(clock.now())
+    feed.set(odometry=odometry(x=1.0, z=-2.5))             # moved 1 m
+    state.tick(clock.now())
+    assert len(calls) == 2
 
 
 # ---- APPROACHING --------------------------------------------------------------------------------

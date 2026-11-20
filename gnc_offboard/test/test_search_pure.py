@@ -4,18 +4,24 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from conftest import TEST_MANIFEST
 from gnc_offboard import search_planners as sp
+from gnc_offboard.frames import FieldFrame
+from gnc_offboard.camera_model import CameraModel, CoverageGrid
 from gnc_offboard.guidance.path_follower import PathFollower
-from gnc_offboard.mission.coverage import CoverageMap
+from gnc_offboard.mission.cameras import (down_footprint_extent, footprints, load_cameras,
+                                          yaw_quaternion)
 from gnc_offboard.mission.dice import count_failure, dice_of, find_die, obstacles_of
 from gnc_offboard.mission.field import FieldConfig
-from gnc_offboard.mission.search import PATTERNS, area_covered, plan_search
+from gnc_offboard.mission.search import (PATTERNS, area_covered, lawnmower_rows,
+                                         lawnmower_skipping, plan_search, row_covered)
 from gnc_offboard.sim.perception_model import Die, PerceptionModel, square_view
 
 FIELD_YAML = Path(__file__).resolve().parents[1] / 'config' / 'field.yaml'
+CAMERAS_YAML = Path(__file__).resolve().parents[1] / 'config' / 'cameras.yaml'
 BOUNDS = (-6.858, -6.858, 6.858, 6.858)
 
 
@@ -46,72 +52,184 @@ def test_field_area_and_bad_bounds():
             'bounds': [0, 0, 1, 1], 'center': [0, 0]}, 'px4_origin': [0, 0]})
 
 
-# ---- coverage memory ----------------------------------------------------------------------------
+# ---- cameras ------------------------------------------------------------------------------------
 
-def test_coverage_marks_square_footprint_once():
-    cov = CoverageMap(BOUNDS, 0.5)
-    new = cov.mark(0.0, 0.0, 2.0)
-    assert new == 16 and cov.mark(0.0, 0.0, 2.0) == 0          # 4 x 4 cells, no double count
-    assert cov.is_seen(0.4, -0.4) and not cov.is_seen(1.6, 0.0)
-    assert not cov.is_seen(100.0, 0.0)
-    cov.clear()
-    assert cov.count == 0 and not cov.is_seen(0.0, 0.0)
-
-
-def test_coverage_ignores_bad_input():
-    cov = CoverageMap(BOUNDS, 0.5)
-    assert cov.mark(float('nan'), 0.0, 2.0) == 0 and cov.mark(0.0, 0.0, 0.0) == 0
-    with pytest.raises(ValueError):
-        CoverageMap(BOUNDS, 0.0)
+def test_camera_config_values():
+    cams = load_cameras(CAMERAS_YAML)
+    assert set(cams) == {'d455', 'down'}
+    assert (cams['d455'].hfov_deg, cams['d455'].vfov_deg, cams['d455'].pitch_down_deg,
+            cams['d455'].max_range_m) == (90.0, 65.0, 45.0, 6.0)
+    assert (cams['down'].hfov_deg, cams['down'].vfov_deg, cams['down'].pitch_down_deg) == \
+        (120.0, 120.0, 90.0)
+    text = CAMERAS_YAML.read_text()
+    assert text.count('TBD') >= 8                      # tilt, lens, offsets, ranges
 
 
-# ---- frontier from coverage memory, and patterns ------------------------------------------------
+def test_camera_config_rejects_missing_or_extra(tmp_path):
+    import yaml
+    data = yaml.safe_load(CAMERAS_YAML.read_text())
+    bad = tmp_path / 'c.yaml'
+    del data['cameras']['down']['roll_deg']
+    bad.write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match='down'):
+        load_cameras(bad)
+    data = yaml.safe_load(CAMERAS_YAML.read_text())
+    data['cameras']['third'] = data['cameras']['down']
+    bad.write_text(yaml.safe_dump(data))
+    with pytest.raises(ValueError, match='exactly'):
+        load_cameras(bad)
+
+
+def test_two_camera_projection_at_search_altitude():
+    cams = load_cameras(CAMERAS_YAML)
+    frame = FieldFrame(0.0, 0.0)
+    polys = footprints(cams, (0.0, 0.0, -2.5), yaw_quaternion(0.0), frame, (-50, -50, 50, 50))
+    down, d455 = polys['down'], polys['d455']
+    # Down: 120 deg square under the drone, 2 * 2.5 * tan(60) = 8.66 m, clipped by the 6 m range.
+    assert np.ptp(down[:, 0]) == pytest.approx(2 * 2.5 * math.tan(math.radians(60)), abs=0.1)
+    assert abs(down[:, 0].mean()) < 0.05 and abs(down[:, 1].mean()) < 0.05
+    assert np.linalg.norm(down, axis=1).max() <= 6.0 + 1e-6
+    # D455: 45 deg down, facing north (yaw 0): its footprint lies ahead, within 6 m.
+    assert d455[:, 1].min() > 0.5 and d455[:, 1].max() <= 6.0 + 1e-6
+
+
+def test_down_footprint_extent_follows_heading():
+    cams = load_cameras(CAMERAS_YAML)
+    wx, wy = down_footprint_extent(cams, 2.5, 0.0)
+    assert wx == pytest.approx(wy, abs=0.05) and wx == pytest.approx(8.66, abs=0.1)
+    wx45, _ = down_footprint_extent(cams, 2.5, math.pi / 4)     # rotated square: wider band
+    assert wx45 > wx
+    small = CameraModel(hfov_deg=60, vfov_deg=60, pitch_down_deg=90, forward_m=0)
+    assert down_footprint_extent({'down': small}, 1.0, 0.0)[0] == pytest.approx(
+        2 * math.tan(math.radians(30)), abs=1e-6)
+
+
+def test_projection_below_ground_sees_nothing():
+    cams = load_cameras(CAMERAS_YAML)
+    polys = footprints(cams, (0.0, 0.0, 0.5), yaw_quaternion(0.0), FieldFrame(0, 0), BOUNDS)
+    assert all(len(p) == 0 for p in polys.values())
+
+
+# ---- coverage memory (camera_model.CoverageGrid) ------------------------------------------------
+
+def grid():
+    return CoverageGrid(BOUNDS, 0.5)
+
+
+def square(cx, cy, side):
+    h = side / 2
+    return np.array([[cx - h, cy - h], [cx + h, cy - h], [cx + h, cy + h], [cx - h, cy + h]])
+
+
+def test_coverage_marks_both_camera_footprints():
+    cams = load_cameras(CAMERAS_YAML)
+    g = grid()
+    polys = footprints(cams, (0.0, 0.0, -2.5), yaw_quaternion(0.0), FieldFrame(0.0, 0.0), BOUNDS)
+    for poly in polys.values():
+        g.mark(poly)
+    assert g.is_seen(0.0, 0.0) and g.is_seen(0.0, 5.0)         # under it, and the D455 ahead
+    assert not g.is_seen(0.0, -5.5) and not g.is_seen(6.0, 6.0)
+    only_down = grid()
+    only_down.mark(polys['down'])
+    assert g.count > only_down.count
+
+
+def test_coverage_grid_mark_clear_and_union_update():
+    g = grid()
+    g.mark(square(0, 0, 2.0))
+    assert g.count == 16 and g.is_seen(0.4, -0.4) and not g.is_seen(1.6, 0.0)
+    assert not g.is_seen(100.0, 0.0)
+    g.update_many([square(-3, 0, 1.0), square(3, 0, 1.0)], 0.0)
+    assert g.is_seen(-3, 0) and g.is_seen(3, 0) and g.in_view[g.searched].sum() == 8
+    g.clear()
+    assert g.count == 0 and not g.is_seen(0, 0)
+    g.update(square(0, 0, 1.0), 0.0)                           # single-camera API still works
+    assert g.count == 4
+
+
+# ---- search patterns, row skipping --------------------------------------------------------------
 
 def area():
     return FieldConfig.load(TEST_MANIFEST).area(1.0)
 
 
+def full():
+    g = grid()
+    g.mark(square(0, 0, 20.0))
+    return g
+
+
+def test_lawnmower_rows_match_the_planner():
+    from gnc_offboard import search_planners as sp
+    rows = lawnmower_rows(area(), (-6.0, -6.0), 3.0)
+    flat = [p for row in rows for p in row]
+    assert flat[0] == pytest.approx((-5.858, -5.858))         # starts at the nearest corner
+    assert all(abs(a[1] - b[1]) < 1e-9 for a, b in rows)      # rows along x
+    assert len(rows) == len(sp._row_positions(area().height, 3.0))
+    rows_y = lawnmower_rows(area(), (-6.0, -6.0), 3.0, 'y')
+    assert all(abs(a[0] - b[0]) < 1e-9 for a, b in rows_y)
+    with pytest.raises(ValueError):
+        lawnmower_rows(area(), (0, 0), 3.0, 'z')
+
+
+def test_covered_rows_are_skipped():
+    g = grid()
+    rows = lawnmower_rows(area(), (-6.0, -6.0), 3.0)
+    first, second = rows[0], rows[1]
+    g.mark(np.array([[-7, first[0][1] - 1.6], [7, first[0][1] - 1.6],
+                     [7, first[0][1] + 1.6], [-7, first[0][1] + 1.6]]))   # the first row's swath
+    assert row_covered(g, first, 3.0) and not row_covered(g, second, 3.0)
+    path = lawnmower_skipping(area(), (-6.0, -6.0), g, 3.0, 'x')
+    assert all(abs(p[1] - first[0][1]) > 1e-6 for p in path)  # first row not flown
+    assert path[0][1] == pytest.approx(second[0][1])
+    fresh = lawnmower_skipping(area(), (-6.0, -6.0), grid(), 3.0, 'x')
+    assert len(path) == len(fresh) - 2
+
+
+def test_partly_covered_row_is_flown():
+    g = grid()
+    first = lawnmower_rows(area(), (-6.0, -6.0), 3.0)[0]
+    g.mark(np.array([[-7, -7], [0, -7], [0, -3], [-7, -3]]))   # west half of the swath only
+    assert not row_covered(g, first, 3.0)
+    assert lawnmower_skipping(area(), (-6.0, -6.0), g, 3.0, 'x')[0][1] == pytest.approx(
+        first[0][1])
+
+
+def test_rows_entered_at_the_nearer_end():
+    path = lawnmower_skipping(area(), (5.5, -6.0), grid(), 3.0, 'x')
+    assert path[0][0] == pytest.approx(5.858)                  # starts on the east side
+
+
 def test_frontier_skips_covered_ground():
-    cov = CoverageMap(BOUNDS, 0.5)
-    for x in [i * 0.5 for i in range(-14, 15)]:         # cover the whole west half
-        for y in [j * 0.5 for j in range(-14, 15)]:
-            if x < 0:
-                cov.mark(x, y, 0.5)
-    fp = sp.footprint(1.5, 70.0)
-    path = plan_search('frontier', area(), (-5.0, -5.0), cov, fp, 1.5, 1.0, [], 0.5)
-    assert path
-    # Every leg ends on new ground: no waypoint deep inside the covered half.
-    assert all(x > -fp for x, _ in path)
-    fresh = sp.frontier(area(), (-5.0, -5.0), fp, pad=1.0, cell=0.5)
+    g = grid()
+    g.mark(np.array([[-7, -7], [0, -7], [0, 7], [-7, 7]]))    # the whole west half
+    fp = 3.0
+    path = plan_search('frontier', area(), (-5.0, -5.0), g, fp, 2.4, 1.0, [], 0.5)
+    assert path and all(x > -fp for x, _ in path)
+    fresh = sp_frontier_fresh(fp)
     assert sp.path_length((-5.0, -5.0), path) < sp.path_length((-5.0, -5.0), fresh)
 
 
-def test_frontier_all_covered_returns_nothing():
-    cov = CoverageMap(BOUNDS, 0.5)
-    cov.mark(0.0, 0.0, 20.0)
-    assert plan_search('frontier', area(), (0.0, 0.0), cov, 2.0, 1.5, 1.0, [], 0.5) == []
-    assert area_covered(cov, area())
+def sp_frontier_fresh(fp):
+    return sp.frontier(area(), (-5.0, -5.0), fp, pad=1.0, cell=0.5)
+
+
+def test_all_covered_returns_nothing():
+    for pattern in PATTERNS:
+        assert plan_search(pattern, area(), (0.0, 0.0), full(), 3.0, 2.4, 1.0, [], 0.5) == []
+    assert area_covered(full(), area())
 
 
 @pytest.mark.parametrize('pattern', PATTERNS)
 def test_every_pattern_plans_inside_the_area(pattern):
-    cov = CoverageMap(BOUNDS, 0.5)
     a = area()
-    path = plan_search(pattern, a, (-6.0, -6.0), cov, sp.footprint(1.5, 70.0), 1.6, 1.0,
-                       [(0.0, 0.0, 0.5)], 0.5)
+    path = plan_search(pattern, a, (-6.0, -6.0), grid(), 3.0, 2.4, 1.0, [(0.0, 0.0, 0.5)], 0.5)
     assert len(path) > 2 and all(a.contains(p) for p in path)
-    assert plan_search(pattern, a, (0, 0), _full(), 2.0, 1.6, 1.0, [], 0.5) == []
-
-
-def _full():
-    cov = CoverageMap(BOUNDS, 0.5)
-    cov.mark(0.0, 0.0, 20.0)
-    return cov
 
 
 def test_unknown_pattern_rejected():
     with pytest.raises(ValueError, match='search_pattern'):
-        plan_search('spiral', area(), (0, 0), CoverageMap(BOUNDS, 0.5), 2.0, 1.6, 1.0, [], 0.5)
+        plan_search('spiral', area(), (0, 0), grid(), 2.0, 1.6, 1.0, [], 0.5)
 
 
 def test_frontier_without_seen_unchanged():

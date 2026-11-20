@@ -24,11 +24,13 @@ from rclpy.node import Node
 from avc_interfaces.msg import (ColorCheck, DiceMap, MissionTarget, ObstacleArray,
                                 PerceptionHeartbeat, TargetRelative)
 from avc_msgs.msg import Intent, LlmHeartbeat, MissionState
-from px4_msgs.msg import BatteryStatus, VehicleLandDetected, VehicleLocalPosition, VehicleStatus
+from px4_msgs.msg import (BatteryStatus, VehicleLandDetected, VehicleLocalPosition,
+                          VehicleOdometry, VehicleStatus)
 
 from gnc_offboard.field_map import default_manifest_path
 from gnc_offboard.guidance import px4_interface as px4
 from gnc_offboard.mission import qos
+from gnc_offboard.mission.cameras import default_cameras_path, load_cameras
 from gnc_offboard.mission.clock import MonotonicClock
 from gnc_offboard.mission.config import MissionConfig, load_yaml_params
 from gnc_offboard.mission.context import MissionContext
@@ -110,6 +112,9 @@ class MissionManagerNode(Node):
         field_file = self.cfg.field_file or str(default_manifest_path())
         self.ctx.field_config = FieldConfig.load(field_file)
         self.get_logger().info(f'Field frame from {field_file}')
+        cameras_file = self.cfg.cameras_file or default_cameras_path()
+        self.ctx.cameras = load_cameras(cameras_file)
+        self.get_logger().info(f'Cameras {sorted(self.ctx.cameras)} from {cameras_file}')
         self._last_target = None
         self.io = RosMissionIO(self)
         self.clock = MonotonicClock()
@@ -152,7 +157,8 @@ class MissionManagerNode(Node):
                 (VehicleStatus, '/fmu/out/vehicle_status', 'vehicle_status'),
                 (VehicleLocalPosition, '/fmu/out/vehicle_local_position', 'local_position'),
                 (VehicleLandDetected, '/fmu/out/vehicle_land_detected', 'land_detected'),
-                (BatteryStatus, '/fmu/out/battery_status', 'battery_status')):
+                (BatteryStatus, '/fmu/out/battery_status', 'battery_status'),
+                (VehicleOdometry, '/fmu/out/vehicle_odometry', 'odometry')):
             self.create_subscription(msg_type, t[base], self._store(name), qos.PX4)
         self.create_timer(1.0 / self.cfg.setpoint_hz, self.stream_setpoint)
 

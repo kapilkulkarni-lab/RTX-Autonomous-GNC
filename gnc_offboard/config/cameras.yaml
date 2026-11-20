@@ -1,0 +1,26 @@
+# The drone's two cameras, as camera_model.CameraModel parameters. The ONE camera config:
+# mission_manager (coverage memory, row spacing) and camera_fov (sim footprints, coverage and
+# Perception stand-in) both read this file (parameter cameras_file; '' = the installed copy).
+# Angles in degrees, mount offsets in meters in body FRD (forward, right, down).
+# max_range_m is the horizontal range Perception can detect dice at, not the optical range.
+cameras:
+  d455:                    # Intel RealSense D455, forward-tilted (RGB stream)
+    hfov_deg: 90.0         # Intel spec (RGB)
+    vfov_deg: 65.0         # Intel spec (RGB)
+    pitch_down_deg: 45.0   # TBD: mount tilt
+    yaw_right_deg: 0.0
+    roll_deg: 0.0
+    forward_m: 0.0         # TBD: mount offset
+    right_m: 0.0           # TBD
+    down_m: 0.0            # TBD
+    max_range_m: 6.0       # TBD: Perception's real detection range with this camera
+  down:                    # downward camera (BrainChip color check, final centering)
+    hfov_deg: 120.0        # TBD: lens spec may be diagonal
+    vfov_deg: 120.0        # TBD: lens spec may be diagonal
+    pitch_down_deg: 90.0
+    yaw_right_deg: 0.0
+    roll_deg: 0.0
+    forward_m: 0.0         # TBD: mount offset
+    right_m: 0.0           # TBD
+    down_m: 0.0            # TBD
+    max_range_m: 6.0       # TBD: Perception's real detection range with this camera

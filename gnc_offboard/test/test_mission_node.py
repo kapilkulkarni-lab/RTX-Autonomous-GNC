@@ -6,7 +6,7 @@ import threading
 import pytest
 import yaml
 
-from conftest import CONFIG_YAML, TEST_MANIFEST, intent
+from conftest import CAMERAS_YAML, CONFIG_YAML, TEST_MANIFEST, intent
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.config import MissionConfig, load_yaml_params
 
@@ -45,8 +45,12 @@ def node():
     rclpy = pytest.importorskip('rclpy')
     from gnc_offboard.ros.mission_manager_node import MissionManagerNode
     rclpy.init(args=['--ros-args', '-p', 'target_hover_s:=7.5',
-                     '-p', f'field_file:={TEST_MANIFEST}'])
-    n = MissionManagerNode(config_path=str(CONFIG_YAML))
+                     '-p', f'field_file:={TEST_MANIFEST}', '-p', f'cameras_file:={CAMERAS_YAML}'])
+    try:
+        n = MissionManagerNode(config_path=str(CONFIG_YAML))
+    except Exception:
+        rclpy.shutdown()
+        raise
     yield n
     n.stop_mission()
     n.destroy_node()
@@ -54,7 +58,8 @@ def node():
 
 
 def test_node_loads_parameters_with_overrides(node, cfg):
-    assert node.cfg == dataclasses.replace(cfg, target_hover_s=7.5, field_file=str(TEST_MANIFEST))
+    assert node.cfg == dataclasses.replace(cfg, target_hover_s=7.5, field_file=str(TEST_MANIFEST),
+                                           cameras_file=str(CAMERAS_YAML))
 
 
 def test_node_publishes_state_without_px4(node):

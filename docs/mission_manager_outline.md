@@ -27,7 +27,7 @@ Rules for the builder:
 | Position source | Qualisys mocap into PX4 EKF2 in the lab; Perception VIO later. GNC reads the fused estimate from PX4 either way |
 | Dice positions | Perception owns the dice map (xyz centroid and color of every die seen). GNC reads it directly and keeps no die memory of its own, except the dice it gave up on, so it does not fly straight back to them: a die whose wrong color Perception confirmed is excluded at once; a die that was lost (`target_lost_s`) or never confirmed (`color_confirm_timeout_s`) is counted and excluded only after `max_die_attempts` failures, and until then stays eligible for SEARCHING's entry check. Both clear on a new target or when the coverage memory resets |
 | Field frame | ENU, origin at the field center, +x east, +y north, meters. Loaded by `field_file`: the world manifest in sim (follows `start_sim.sh -k`), `config/field.yaml` on hardware (field bounds, start zone, and where PX4's local origin sits in the field frame). PX4 north is assumed to be field +y (see open questions) |
-| Downward camera | One camera pointing straight down. BrainChip confirms die color from it, and it drives the final centering during descent |
+| Cameras | Two, both `camera_model.CameraModel` instances in `config/cameras.yaml`, the one camera config every node reads (`cameras_file`): **d455**, an Intel RealSense D455 tilted forward (`pitch_down_deg` 45 TBD, RGB 90 x 65 deg, mount offset TBD, `max_range_m` 6.0 TBD = Perception's detection range); **down**, pointing straight down (120 x 120 deg TBD, mount offset TBD, `max_range_m` 6.0 TBD). Both footprints mark the coverage memory. BrainChip confirms die color from the down camera, and it drives the final centering during descent |
 | Main entry point | `mission_manager` is the one script that flies the mission. `mission_demo.py` is retired: lift its arming, offboard handshake and setpoint code into `guidance/px4_interface.py`, then remove `mission_demo` from `setup.py` and delete the file (git history keeps it). Nothing new may import or launch it |
 
 House conventions:
@@ -73,7 +73,7 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 | 1 | STANDBY | Disarmed, no setpoints | Wait for the first `retrieve` intent with a target color | `start` |
 | 2 | PREFLIGHT | Start the setpoint stream (hold current pose) | Wait for EKF converged and stable for `ekf_stable_s` and the stream running for `offboard_warmup_s`; record start position in the field frame; arm; switch to offboard (commands resent every `cmd_retry_s`). With `require_pilot_arm: true` GNC never sends arm: it waits for the pilot to arm (no timeout), then switches to offboard | `ready`, `failed` |
 | 3 | TAKEOFF | Setpoint = start position at search altitude | Check altitude within tolerance | `at_altitude` |
-| 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise plan the search pattern (`search_pattern`: `frontier` by default, which starts from the coverage memory so it never re-flies covered ground; `lawnmower` and `zone_sweep` for comparison) at `search_altitude_m`, routing around obstacles, and any target quadrant first | Follow pattern; mark covered cells (detection footprint of `detect_fov_deg`, nadir); leave when the dice map reports the active color. Whole field covered without the target: clear the coverage memory and search again (`reason`: "target not found, searching again") | `target_known`, `target_found` |
+| 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise plan the search pattern at `search_altitude_m` (`search_pattern`: `lawnmower` by default, rows along `search_rows_along`, row spacing = the down camera's footprint width across the rows at search altitude x (1 - `search_overlap`), rows already covered skipped; `frontier` and `zone_sweep` selectable for comparison), routing around obstacles, and any target quadrant first. The search holds the start heading | Follow pattern; mark covered cells with both cameras' projected footprints (from PX4 odometry position and attitude); leave when the dice map reports the active color. Whole field covered without the target: clear the coverage memory and search again (`reason`: "target not found, searching again") | `target_known`, `target_found` |
 | 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map, at `search_altitude_m`, then straight down to `hover_height_m` | Center over the die on `/perception/target_relative` (within `approach_center_tol_m`); run the color check from the downward camera, using only colors confirmed since arriving | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `lost` → SEARCHING (color PENDING keeps waiting). `lost`: no `target_relative` for `target_lost_s`, or no confirmed color `color_confirm_timeout_s` after arriving; counts one failure for that die (excluded after `max_die_attempts`; a confirmed wrong color excludes it at once) |
 | 6 | DESCENDING | Lock the touchdown point to the centroid's x/y | Descend in stages at TBD m/s; at each stage re-center on Perception's target-relative position and only continue while the sideways error is under that stage's tolerance; re-check color while the die is in view; below the camera blind height finish on the last good centering plus rangefinder and EKF; confirm touchdown from the rangefinder, not only PX4's land detector | `touchdown`, `retry` (error too large or die lost: climb to hover height and try again), `failed` (retries used) → APPROACHING |
 | 7 | NFC\_READY | On the die. Motor stage 1: stay armed at idle (minimum throttle). Stage 2: disarm. Send `/hw/nfc/command` start | Wait for NFC status `reading` | `read_started`, `timeout` |
@@ -288,9 +288,9 @@ gnc_offboard/gnc_offboard/
         mission_manager_smach.py # MissionStateBase + all 15 states + build_state_machine(ctx, io, cfg)
         intents.py  config.py  clock.py
         field.py                 # FieldConfig from the world manifest (sim) or config/field.yaml (hardware)
-        coverage.py              # coverage memory: ground already searched
+        cameras.py               # loads config/cameras.yaml (d455, down); footprints from a PX4 pose
         dice.py                  # dice-map and obstacle lookups
-        search.py                # SEARCHING's path from the search planners (search_pattern)
+        search.py                # SEARCHING's path (search_pattern); lawnmower skips covered rows
     search_planners.py  search_regions.py   # existing planners (frontier takes seen= from coverage)
     guidance/px4_interface.py    # arming, disarming, offboard handshake, setpoints (lifted from mission_demo.py)
     guidance/path_follower.py    # waypoints -> smooth setpoints (CubicSegment per leg)
@@ -299,11 +299,15 @@ gnc_offboard/gnc_offboard/
         fake_intent.py           # CLI: any intent, including stop-word style with empty fields
         fake_comms.py            # LLM heartbeat at 5 Hz; echoes last_nfc_read_id and last_state_seq, link_ok (scriptable: delay or withhold the echo)
         fake_hardware.py         # NFC reader + gripper stand-in with configurable failures per motor stage
-        perception_model.py      # pure: what a stand-in Perception reports, shared by fake_dice_map and tests
-        fake_dice_map.py         # Perception dice map, target_relative, color check, obstacles and heartbeat
-                                 # from the world manifest and the camera model (wrong_color_first, drop_detections, heartbeat)
+        perception_model.py      # pure: what a stand-in Perception reports, shared by camera_fov and tests
+    camera_fov.py                # SIM: both cameras' footprints (/camera/footprint/{d455,down}), coverage
+                                 # (/camera/searched, Gazebo markers, JSON), /camera/target_detection, and the
+                                 # Perception stand-in: dice map (either camera), target_relative and color check
+                                 # (down camera), obstacles and heartbeat (wrong_color_first, drop_detections, heartbeat)
+    camera_model.py              # CameraModel (projection) and CoverageGrid (the coverage memory)
 
 gnc_offboard/config/mission.yaml
+gnc_offboard/config/cameras.yaml        # the one camera config (d455, down)
 gnc_offboard/config/field.yaml          # hardware field geometry (TBD values)
 gnc_offboard/launch/mission.launch.py   # mission_manager, plus sim stand-ins when sim:=true
 gnc_offboard/test/
@@ -323,15 +327,15 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `offboard_warmup_s`, `cmd_retry_s` | PREFLIGHT, LANDING, PAUSED, ABORTED | 1.0, 1.0 |
 | `require_pilot_arm` | PREFLIGHT | false (SITL); true on hardware |
 | `landed_disarm_grace_s` | LANDING | 0.5 |
-| `search_altitude_m`, `altitude_tol_m` | TAKEOFF, SEARCHING | 1.5, 0.15 |
+| `search_altitude_m`, `altitude_tol_m` | TAKEOFF, SEARCHING, APPROACHING transit | 2.5, 0.15 |
 | `target_lost_s` | APPROACHING, DESCENDING (no `target_relative`) | 2.0 |
 | `color_confirm_timeout_s` | APPROACHING (no confirmed color after arriving) | 5.0 (TBD) |
 | `approach_center_tol_m`, `die_match_radius_m` | APPROACHING | 0.10, 0.3 (TBD) |
 | `max_die_attempts` | APPROACHING, SEARCHING (lost / never-confirmed die skipped after this many failures) | 2 (TBD) |
 | `target_hover_s` | TARGET\_HOVER (temporary) | 5.0 |
-| `search_pattern` | SEARCHING | `frontier` (`lawnmower`, `zone_sweep` for comparison) |
-| `detect_fov_deg` | SEARCHING coverage, footprint | 70 (TBD: width Perception detects dice in, not the 120 deg lens FOV) |
-| `search_overlap`, `coverage_cell_m`, `wall_margin_m`, `obstacle_clearance_m` | SEARCHING, APPROACHING | 0.2, 0.5, 1.0, 0.5 |
+| `search_pattern`, `search_rows_along` | SEARCHING | `lawnmower` (`frontier`, `zone_sweep` for comparison), `x` |
+| `cameras_file` | Coverage, row spacing (and camera_fov) | '' = installed `config/cameras.yaml` |
+| `search_overlap`, `coverage_cell_m`, `wall_margin_m`, `obstacle_clearance_m` | SEARCHING, APPROACHING | 0.2 (of the down footprint width), 0.5, 1.0, 0.5 |
 | `cruise_speed_mps`, `max_accel_mps2`, `acceptance_radius_m` | Path following | 1.0, 0.5, 0.25 |
 | `require_perception` | Global | true (false: lab flights without Perception) |
 | `field_file` | Field frame | '' = sim world manifest; `config/field.yaml` on hardware |
@@ -381,7 +385,7 @@ The state machine must be fully testable without Gazebo or PX4, then flown in PX
 | Staleness | A heartbeat that stops updating triggers its failure path after the configured time |
 | Color check | RIGHT when the confirmed color equals the target, WRONG when it differs, PENDING when missing or empty; PENDING never causes a transition; `confidence` is ignored |
 
-**Sim stand-ins (ROS nodes, sim only):** `fake_intent.py`, `fake_comms.py`, `fake_hardware.py` and `fake_dice_map.py` (which also publishes the Perception heartbeat; see File layout).
+**Sim stand-ins (ROS nodes, sim only):** `fake_intent.py`, `fake_comms.py`, `fake_hardware.py`, and `camera_fov` as the Perception stand-in (see File layout).
 
 **SITL acceptance runs**
 
@@ -406,7 +410,7 @@ One milestone per PR. Each ends with `colcon build` clean and all tests green.
 2. **Core, no ROS.** `context.py`, `io.py`, `checks.py`, `qos.py`, `state_msg.py` and their tests.
 3. **Retire mission\_demo; flight phases.** Lift the PX4 code from `mission_demo.py` into `px4_interface.py`, then remove `mission_demo` from `setup.py` and delete it. Build STANDBY → PREFLIGHT → TAKEOFF → hover → LANDING → RETURN\_CONFIRMED, plus ABORTED and the global checks. Fly it in SITL with `ros2 run gnc_offboard mission_manager`. Check every comms topic with `ros2 topic info -v` against comms' node.
 4. **Intents and pause.** Intent handling, the three rejections, PAUSED and the resume rule, on the flight phases first.
-5. **Search and approach.** SEARCHING, APPROACHING, the dice map lookup, color check, retarget, with `fake_dice_map.py`.
+5. **Search and approach.** SEARCHING, APPROACHING, the dice map lookup, color check, retarget, with `camera_fov` standing in for Perception.
 6. **Descent and liftoff.** DESCENDING and LIFTOFF, including re-arming after motors off. Run the landing-accuracy test.
 7. **NFC.** NFC\_READY and READING, both motor stages, the wait for comms' `read_id` echo, with `fake_hardware.py` and `fake_comms.py`.
 8. **Retrieve and return.** RETRIEVING, RETURNING, time thresholds, battery.
@@ -445,7 +449,9 @@ The builder should code these behind a parameter or a clearly marked default, no
 **For Perception**
 
 - [ ] **Dice map:** topic name, message type and rate. GNC uses placeholders: `DiceMap`, `TargetRelative` (offset in field ENU), `ObstacleArray`, `PerceptionHeartbeat`.
-- [ ] **Detection width:** across what width (or angle) can Perception actually detect dice from search altitude? The lens is 120 deg; GNC plans coverage with `detect_fov_deg` (placeholder 70) until Perception says.
+- [ ] **D455 tilt and mount:** the D455's pitch down from horizontal (placeholder 45 deg) and its mount offset.
+- [ ] **Down camera lens FOV:** are the 120 deg horizontal and vertical, or diagonal? (placeholder 120 x 120). Mount offset too.
+- [ ] **Detection range per camera:** how far (horizontally) Perception actually detects dice with the D455 and with the down camera, from search altitude (placeholder `max_range_m` 6.0 for both). Coverage marks only ground within it.
 - [ ] **Final approach:** rate and accuracy of `/perception/target_relative` below 1 m, and the camera blind height.
 - [ ] **Color confirmation (Perception's decision, not GNC's):** BrainChip's confidence threshold and window, from test data under venue lighting, and the final `ColorCheck.msg` format. GNC only reads the confirmed color.
 

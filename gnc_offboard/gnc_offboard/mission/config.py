@@ -32,7 +32,8 @@ class MissionConfig:
     px4_discovery_timeout_s: float
     field_file: str
     search_pattern: str
-    detect_fov_deg: float
+    search_rows_along: str
+    cameras_file: str
     search_overlap: float
     coverage_cell_m: float
     wall_margin_m: float
@@ -73,10 +74,13 @@ class MissionConfig:
                 typed[f.name] = int(v)
             else:
                 typed[f.name] = float(v)
-        from gnc_offboard.mission.search import PATTERNS
+        from gnc_offboard.mission.search import PATTERNS, ROWS_ALONG
         if typed['search_pattern'] not in PATTERNS:
             raise ValueError(f'search_pattern must be one of {PATTERNS}, '
                              f'got {typed["search_pattern"]!r}')
+        if typed['search_rows_along'] not in ROWS_ALONG:
+            raise ValueError(f'search_rows_along must be one of {ROWS_ALONG}, '
+                             f'got {typed["search_rows_along"]!r}')
         return cls(**typed)
 
 

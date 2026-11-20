@@ -24,7 +24,6 @@ setup(
     entry_points={
         'console_scripts': [
             'mission_manager = gnc_offboard.ros.mission_manager_node:main',
-            'fake_dice_map = gnc_offboard.sim.fake_dice_map:main',
             'mission_lawnmower = gnc_offboard.mission_lawnmower:main',
             'mission_spiral_in = gnc_offboard.mission_spiral_in:main',
             'mission_spiral_out = gnc_offboard.mission_spiral_out:main',

@@ -25,6 +25,7 @@ INPUT_NAMES = (
     'vehicle_status',      # /fmu/out/vehicle_status
     'battery_status',      # /fmu/out/battery_status
     'local_position',      # /fmu/out/vehicle_local_position
+    'odometry',            # /fmu/out/vehicle_odometry (position + attitude: camera footprints)
     'land_detected',       # /fmu/out/vehicle_land_detected
     'distance_sensor',     # /fmu/out/distance_sensor
 )
@@ -53,6 +54,7 @@ class Inputs:
     vehicle_status: Optional[Stamped] = None
     battery_status: Optional[Stamped] = None
     local_position: Optional[Stamped] = None
+    odometry: Optional[Stamped] = None
     land_detected: Optional[Stamped] = None
     distance_sensor: Optional[Stamped] = None
 
@@ -84,7 +86,9 @@ class MissionContext:
 
     # Field and search (Milestone 5).
     field_config: Any = None                 # field.FieldConfig
-    coverage: Any = None                     # coverage.CoverageMap: ground already searched
+    coverage: Any = None                     # camera_model.CoverageGrid: ground already searched
+    cameras: Any = None                      # {'d455': CameraModel, 'down': CameraModel}
+    coverage_pose: Optional[Any] = None      # (position, q) of the odometry last marked
     target_centroid: Optional[Any] = None    # field x, y, z of the target die once known
     given_up_dice: List[Any] = field(default_factory=list)  # field points excluded from the search
     die_failures: List[Any] = field(default_factory=list)   # [point, count]: lost / never confirmed

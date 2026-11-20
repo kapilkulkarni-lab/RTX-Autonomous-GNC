@@ -13,6 +13,7 @@ TEMPORARY until later milestones (search for "TEMPORARY"; outline: Temporary sta
     - read_chip is always rejected (Milestone 7).
 """
 import enum
+import math
 from typing import Callable, List, Optional
 
 import smach
@@ -25,7 +26,8 @@ from gnc_offboard.mission import intents as I
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.checks import (ColorResult, check_color, confirmed_color, invalid_for,
                                          is_centered, is_stale)
-from gnc_offboard.mission.coverage import CoverageMap
+from gnc_offboard.camera_model import CoverageGrid
+from gnc_offboard.mission.cameras import down_footprint_extent, footprints, load_cameras
 from gnc_offboard.mission.dice import count_failure, find_die, obstacles_of
 from gnc_offboard.mission.search import plan_search
 from gnc_offboard.mission.config import MissionConfig
@@ -37,6 +39,7 @@ ABORTED_OUT = 'aborted'
 RETURN_OUT = 'return'
 PAUSE_OUT = 'pause'
 RETARGET_SEEN = 'retarget_seen'
+_COS_HALF_5_DEG = math.cos(math.radians(5.0) / 2.0)   # quaternion |dot| for a 5 deg turn
 RETARGET_UNSEEN = 'retarget_unseen'
 PREEMPTED = 'preempted'
 RESUME_NEW_INTENT = 'resume_new_intent'
@@ -341,17 +344,26 @@ class MissionStateBase(smach.State):
         return (n, e, start_z - height)
 
     def _mark_coverage(self, snap) -> None:
-        """Mark the ground under the detection footprint as searched (airborne only)."""
-        if self.ctx.coverage is None or self.mode() not in S.AIRBORNE:
+        """Mark both cameras' projected footprints as searched, while airborne. Projects again
+        only once the pose has moved half a coverage cell or turned (~5 deg), so hovering
+        costs nothing."""
+        odom = snap.odometry
+        if (self.ctx.coverage is None or self.ctx.cameras is None or odom is None
+                or self.mode() not in S.AIRBORNE):
             return
-        lp = _msg(snap.local_position)
-        if not px4.position_valid(lp):
-            return
-        alt = self.altitude(lp)
-        if alt <= 0.1:
-            return
-        x, y, _ = self.field_xyz(lp)
-        self.ctx.coverage.mark(x, y, sp.footprint(alt, self.cfg.detect_fov_deg))
+        position = [float(v) for v in odom.msg.position]
+        q = [float(v) for v in odom.msg.q]
+        last = self.ctx.coverage_pose
+        if last is not None:
+            moved = math.dist(position, last[0]) >= self.cfg.coverage_cell_m / 2.0
+            turned = abs(sum(a * b for a, b in zip(q, last[1]))) < _COS_HALF_5_DEG
+            if not (moved or turned):
+                return
+        self.ctx.coverage_pose = (position, q)
+        polygons = footprints(self.ctx.cameras, position, q, self.ctx.field_config.frame,
+                              self.ctx.field_config.bounds)
+        for polygon in polygons.values():
+            self.ctx.coverage.mark(polygon)
 
     def on_update_only(self, intent, now):
         with self.ctx.lock:
@@ -536,11 +548,15 @@ class Searching(MissionStateBase):
         cfg, fc = self.cfg, self.ctx.field_config
         x, y, _ = self.field_xyz(lp)
         alt = cfg.search_altitude_m
+        yaw = self.ctx.start_position[3] if self.ctx.start_position else lp.heading
+        # The down camera's footprint at search altitude, at the constant search heading.
+        wx, wy = down_footprint_extent(self.ctx.cameras, alt, yaw)
+        across = wy if cfg.search_rows_along == 'x' else wx
+        spacing = max(across * (1.0 - cfg.search_overlap), cfg.coverage_cell_m)
         path = plan_search(cfg.search_pattern, fc.area(cfg.wall_margin_m), (x, y),
-                           self.ctx.coverage, sp.footprint(alt, cfg.detect_fov_deg),
-                           sp.row_spacing(alt, cfg.detect_fov_deg, cfg.search_overlap),
+                           self.ctx.coverage, max(min(wx, wy), cfg.coverage_cell_m), spacing,
                            cfg.wall_margin_m, obstacles_of(_msg(snap.obstacles)),
-                           cfg.obstacle_clearance_m)
+                           cfg.obstacle_clearance_m, rows_along=cfg.search_rows_along)
         if not path:
             if restarted:
                 self.follower = None             # nothing to fly even after a reset: hover
@@ -955,8 +971,10 @@ def build_state_machine(ctx: MissionContext, io: MissionIO, cfg: MissionConfig,
                         clock) -> smach.StateMachine:
     """The mission state machine. Run it with run_mission() (or sm.execute()); stop it with
     sm.request_preempt()."""
+    if ctx.cameras is None:
+        ctx.cameras = load_cameras(cfg.cameras_file or None)
     if ctx.coverage is None and ctx.field_config is not None:
-        ctx.coverage = CoverageMap(ctx.field_config.bounds, cfg.coverage_cell_m)
+        ctx.coverage = CoverageGrid(ctx.field_config.bounds, cfg.coverage_cell_m)
     sm = smach.StateMachine(outcomes=[MISSION_COMPLETE, MISSION_ABORTED, PREEMPTED])
     with sm:
         for cls in STATE_CLASSES:

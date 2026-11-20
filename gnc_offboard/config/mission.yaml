@@ -18,7 +18,7 @@ mission_manager:
     require_pilot_arm: false      # true: never send arm; wait for the pilot to arm (false in SITL)
 
     # TAKEOFF
-    search_altitude_m: 1.5        # TBD: above the start position
+    search_altitude_m: 2.5        # TBD: above the start position (TAKEOFF, SEARCHING, APPROACHING transit)
     altitude_tol_m: 0.15          # TBD
 
     # LANDING
@@ -42,10 +42,13 @@ mission_manager:
     # config/field.yaml). '' = the sim world manifest ($AVC_SIM_DIR/worlds/avc_field_manifest.json).
     field_file: ''
 
+    # Cameras: config/cameras.yaml (both cameras; also read by camera_fov). '' = installed copy.
+    cameras_file: ''
+
     # SEARCHING
-    search_pattern: frontier      # frontier | lawnmower | zone_sweep (comparison in SITL)
-    detect_fov_deg: 70.0          # TBD: width Perception can detect dice in (not the 120 deg lens FOV)
-    search_overlap: 0.2           # lawnmower / zone_sweep row overlap
+    search_pattern: lawnmower     # lawnmower | frontier | zone_sweep (comparison in SITL)
+    search_rows_along: x          # lawnmower rows run along field x or y
+    search_overlap: 0.2           # row overlap, as a fraction of the down camera's footprint width
     coverage_cell_m: 0.5          # coverage memory cell size
     wall_margin_m: 1.0            # TBD: fly no closer than this to the field edge
     obstacle_clearance_m: 0.5     # TBD: keep this far from obstacle edges

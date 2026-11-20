@@ -1,6 +1,7 @@
 """Exercise recording and export without arming or sending flight commands."""
 import json
 import time
+from pathlib import Path
 from unittest.mock import patch
 import numpy as np
 
@@ -25,8 +26,10 @@ def test_records_vehicle_path_target_and_exports_map(tmp_path):
                     {'color': 'red', 'x': 1, 'y': -2}],
     }))
     output = tmp_path/'coverage.json'
+    cameras = Path(__file__).resolve().parent / 'data' / 'cameras_single.yaml'
     rclpy.init(args=['--ros-args', '-p', f'manifest:={manifest}',
-                    '-p', f'output:={output}', '-p', 'gazebo_markers:=false'])
+                    '-p', f'output:={output}', '-p', 'gazebo_markers:=false',
+                    '-p', f'cameras_file:={cameras}'])
     node = None
     listener = None
     try:
@@ -112,6 +115,7 @@ def test_records_vehicle_path_target_and_exports_map(tmp_path):
         assert exposure[(.125, -2.125)] == pytest.approx(.25)
         assert exposure[(.125, 2.125)] == pytest.approx(.25)
         assert output.with_suffix('.png').read_bytes().startswith(b'\x89PNG')
+        assert set(data['cameras']) == {'d455', 'down'}       # new keys; old ones unchanged
         node.destroy_node()
         node = None
         node = CameraFov()
