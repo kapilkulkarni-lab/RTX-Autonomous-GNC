@@ -43,7 +43,7 @@ House conventions:
 One node, `mission_manager`, owns the mission state. A SMACH `StateMachine` runs in a worker thread; the ROS node spins in the main thread and handles all I/O. They share one `MissionContext` object.
 
 1. **Node (ROS side).** Subscriptions store the latest message and receive time into `MissionContext`. A 20 Hz timer streams the current setpoint to PX4 so offboard never drops, whatever SMACH is doing, including while landed on the die. A 5 Hz timer publishes `/mission/state`; a state change or a handled intent publishes immediately too.
-2. **MissionContext (shared, lock-protected).** Latest inputs (including Perception's dice map), active target color, active regions with their until rules, mission clock, retry counters (descent, NFC per motor stage), motor stage on the die, current setpoint, where to go after LIFTOFF, `paused_from`, the stored intent received while paused, last handled `intent_id` and its result, `read_id` counter, and NFC results awaiting a comms verdict.
+2. **MissionContext (shared, lock-protected).** Latest inputs (including Perception's dice map), active target color, active regions with their until rules, mission clock, retry counters (descent, NFC per motor stage), motor stage on the die, current setpoint, where to go after LIFTOFF, `paused_from`, the stored intent received while paused, last handled `intent_id` and its result, `read_id` counter, and NFC results awaiting comms' echo.
 3. **SMACH states (ROS-free).** Each state subclasses a common `MissionStateBase(smach.State)`. Its `execute()` loops at 20 Hz: take a snapshot of the context, run the global checks, run the state's own checks, write any actions, and return an outcome when a transition fires. States never call rclpy directly; they write to the context or call an injected `MissionIO` interface.
 4. **MissionIO interface.** Methods such as `set_setpoint()`, `arm()`, `disarm()`, `set_offboard()`, `land()`, `nfc_command()`, `gripper_command()`, `publish_nfc_result()`. The node implements it with real publishers; tests use a fake that records calls.
 5. **State names.** Each state is added to SMACH under comms' constant (`MissionState.STATE_SEARCHING` and so on), so SMACH's active state label is exactly what goes on `/mission/state`. A SMACH transition callback (`register_transition_cb`) records `previous_state` and `reason` and triggers an immediate publish.
@@ -73,10 +73,10 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 | 2 | PREFLIGHT | Start the setpoint stream (hold current pose) | Wait for EKF converged and stable for TBD s; record start position in the field frame; arm; switch to offboard | `ready`, `failed` |
 | 3 | TAKEOFF | Setpoint = start position at search altitude | Check altitude within tolerance | `at_altitude` |
 | 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise fly the search pattern, skipping ground already covered, and any target quadrant first | Follow pattern; mark covered cells; leave when the dice map reports the active color | `target_known`, `target_found` |
-| 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map | Fly to hover height (TBD) over the centroid; run the color check from the downward camera | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `nothing` / `lost` → SEARCHING |
+| 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map | Fly to hover height (TBD) over the centroid; run the color check from the downward camera | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `lost` → SEARCHING (color PENDING keeps waiting) |
 | 6 | DESCENDING | Lock the touchdown point to the centroid's x/y | Descend in stages at TBD m/s; at each stage re-center on Perception's target-relative position and only continue while the sideways error is under that stage's tolerance; re-check color while the die is in view; below the camera blind height finish on the last good centering plus rangefinder and EKF; confirm touchdown from the rangefinder, not only PX4's land detector | `touchdown`, `retry` (error too large or die lost: climb to hover height and try again), `failed` (retries used) → APPROACHING |
 | 7 | NFC\_READY | On the die. Motor stage 1: stay armed at idle (minimum throttle). Stage 2: disarm. Send `/hw/nfc/command` start | Wait for NFC status `reading` | `read_started`, `timeout` |
-| 8 | READING | Stay landed in the current motor stage | Wait for `/hw/nfc/result`; publish it on `/mission/nfc_result` with a new `read_id`; then wait for comms' verdict on that `read_id`. No timeout: wait until comms says success or failed (global checks still apply) | `success_retrieve`, `success_return`, `failed_retry` (same stage), `failed_motors_off` (stage 1 used up → disarm, NFC\_READY), `failed_redescend` (stage 2 used up, first time → LIFTOFF then DESCENDING), `failed_hold` |
+| 8 | READING | Stay landed in the current motor stage | Wait for `/hw/nfc/result`; publish it on `/mission/nfc_result` with a new `read_id`; then wait until `/llm/heartbeat` echoes that `read_id` (`read_complete()`). The hardware result (`NfcResult.success`) decides success or failure. No timeout (global checks still apply) | `success_retrieve`, `success_return`, `failed_retry` (same stage), `failed_motors_off` (stage 1 used up → disarm, NFC\_READY), `failed_redescend` (stage 2 used up, first time → LIFTOFF then DESCENDING), `failed_hold` |
 | 9 | RETRIEVING | Re-run the color check if the camera still sees the die; send gripper close | Wait for gripper `holding` | `holding`, `failed` (both → LIFTOFF, then RETURNING) |
 | 10 | LIFTOFF | Re-arm and re-enter offboard if disarmed | Climb straight off the die to hover height | `to_descending`, `to_searching`, `to_approaching`, `to_returning` (chosen from the context) |
 | 11 | RETURNING | Plan path to start zone center | Follow path | `over_start` |
@@ -88,7 +88,7 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 Notes:
 
 - **Two-stage NFC read.** Stage 1, motors at idle: up to TBD reads. Stage 2, motors fully off: up to TBD reads. If both fail, LIFTOFF, re-center and DESCEND once more, then repeat both stages. If that fails too, hold landed and report on `/mission/state` until the leader sends a command. The motor stage goes in `reason`, for example "read failed at idle, retrying motors off".
-- **Comms decides every read.** Every result, success or failure, goes to comms on `/mission/nfc_result` and is republished each heartbeat until comms answers. GNC moves on only on comms' verdict for that `read_id`. A late verdict for an earlier `read_id` still counts.
+- **Comms acknowledges every read (option B, decided Nov 19).** Every result, success or failure, goes to comms on `/mission/nfc_result` and is republished on every comms heartbeat until `LlmHeartbeat.last_nfc_read_id` echoes its `read_id`. Only then is the read complete, and `NfcResult.success` (from the hardware result) decides success or failure. No timeout. An echo completes only its own `read_id`, and only from a heartbeat received after that result was first published: `read_id` restarts at 1 when GNC restarts, and comms may still be echoing the old run's 1, so an older heartbeat must not complete the new read. An echo of a different `read_id` does not complete the read. All of this lives in one pure function, `read_complete()` in `checks.py`, so a comms verdict field can replace it later without touching the states.
 - **PX4 auto-disarm.** PX4 disarms on its own a few seconds after landing (`COM_DISARM_LAND`), which would end motor stage 1 early. GNC must own disarming on the die; flag the parameter for the GNC lead to set.
 - `success_retrieve` requires retrieval enabled, enough time left (TBD) and the color check still right; otherwise `success_return` (LIFTOFF, then RETURNING).
 - Time thresholds: past the first, RETRIEVING is skipped; past the second, the global check forces a return.
@@ -108,18 +108,18 @@ Wire these as the SMACH `transitions={...}` map for each state. Global outcomes 
 | SEARCHING | `target_found` | Dice map reports the active color | APPROACHING |
 | APPROACHING | `over_target` | At hover height over the centroid, centered, color check right | DESCENDING |
 | APPROACHING | `wrong_color_known` | Color check wrong; the target color is elsewhere in the dice map | APPROACHING (new goal) |
-| APPROACHING | `wrong_color_unknown`, `nothing`, `lost` | Color check wrong with target not in the map, low confidence, or no detection for TBD s | SEARCHING |
+| APPROACHING | `wrong_color_unknown`, `lost` | Color check WRONG with target not in the map, or no detection for TBD s (`target_lost_s`; also covers a die whose color is never confirmed) | SEARCHING |
 | DESCENDING | `touchdown` | Touchdown confirmed over the centroid | NFC\_READY (motor stage 1) |
 | DESCENDING | `retry` | Sideways error over tolerance or die lost; retries left | DESCENDING (after climbing to hover height) |
 | DESCENDING | `failed` | Descent retries used | APPROACHING |
 | NFC\_READY | `read_started` | NFC status `reading` | READING |
 | NFC\_READY | `timeout` | No `reading` status in TBD s | Counts as a failed read |
-| READING | `success_retrieve` | Comms verdict success; retrieval enabled, time left, color still right | RETRIEVING |
-| READING | `success_return` | Comms verdict success, otherwise | LIFTOFF → RETURNING |
-| READING | `failed_retry` | Comms verdict failed; tries left in this motor stage | NFC\_READY (same stage) |
-| READING | `failed_motors_off` | Comms verdict failed; stage 1 used up | NFC\_READY (disarm, stage 2) |
-| READING | `failed_redescend` | Comms verdict failed; stage 2 used up, first time | LIFTOFF → DESCENDING |
-| READING | `failed_hold` | Comms verdict failed; second full cycle used up | Hold landed in READING, wait for intent |
+| READING | `success_retrieve` | Read complete (echoed), hardware success; retrieval enabled, time left, color still right | RETRIEVING |
+| READING | `success_return` | Read complete (echoed), hardware success, otherwise | LIFTOFF → RETURNING |
+| READING | `failed_retry` | Read complete (echoed), hardware failed; tries left in this motor stage | NFC\_READY (same stage) |
+| READING | `failed_motors_off` | Read complete (echoed), hardware failed; stage 1 used up | NFC\_READY (disarm, stage 2) |
+| READING | `failed_redescend` | Read complete (echoed), hardware failed; stage 2 used up, first time | LIFTOFF → DESCENDING |
+| READING | `failed_hold` | Read complete (echoed), hardware failed; second full cycle used up | Hold landed in READING, wait for intent |
 | RETRIEVING | `holding`, `failed` | Gripper holding; or fault, failure, time short | LIFTOFF → RETURNING |
 | LIFTOFF | `to_descending`, `to_searching`, `to_approaching`, `to_returning` | At hover height; target state taken from the context | DESCENDING / SEARCHING / APPROACHING / RETURNING |
 | RETURNING | `over_start` | Over start zone center | LANDING |
@@ -133,13 +133,13 @@ Wire these as the SMACH `transitions={...}` map for each state. Global outcomes 
 
 ### Color check
 
-BrainChip confirms die color from the downward camera, published on `/perception/color_check`. GNC decides on a window of the last TBD messages, not one frame.
+Perception owns the color check end to end: BrainChip on the downward camera, the windowing over frames and the confidence threshold. It publishes a confirmed color on `/perception/color_check`. GNC reads only the color field (`color_guess`) and ignores `confidence`; it keeps no window and no threshold. One pure function, `check_color(confirmed_color, target)` in `checks.py`, gives the result.
 
 | Result | Rule | Action |
 | --- | --- | --- |
-| Right color | Confidence ≥ TBD and guess = target | Continue |
-| Wrong color | Confidence ≥ TBD and guess ≠ target | Go to the target if the dice map has it elsewhere, else SEARCHING. Perception corrects the die's color in its own map |
-| Nothing | Confidence < TBD | SEARCHING |
+| RIGHT | Confirmed color = target | Continue |
+| WRONG | Confirmed color ≠ target | Go to the target if the dice map has it elsewhere, else SEARCHING. Perception corrects the die's color in its own map |
+| PENDING | No confirmed color yet (message missing or color empty) | Keep waiting. PENDING never causes a transition; a die that is never confirmed is handled by the target-lost timeout (`target_lost_s`) |
 
 Run it at hover height before DESCENDING starts, again during the descent while the die is in view, and on entry to RETRIEVING.
 
@@ -181,10 +181,10 @@ Comms owns `Intent`, `MissionState`, `NfcResult` and `LlmHeartbeat` in `avc_msgs
 | From | Topic | Type / contents | QoS |
 | --- | --- | --- | --- |
 | Comms | `/mission/intent` | `avc_msgs/Intent` | Reliable, volatile, keep last 10 |
-| Comms | `/llm/heartbeat` | `avc_msgs/LlmHeartbeat`: alive, echoed `read_id`, comms' verdict on each NFC read (success or failed) | Reliable, volatile, keep last 10 (Abhi's proposal) |
+| Comms | `/llm/heartbeat` | `avc_msgs/LlmHeartbeat` at 5 Hz: `last_state_seq`, `last_nfc_read_id` (the echo that completes an NFC read), `link_ok` (radio link to the leader). Comms liveness is judged by message age | Reliable, volatile, keep last 10 (Abhi's proposal) |
 | Perception | `/perception/dice_map` (placeholder) | Every die seen: color and xyz centroid in the field frame | TBD |
 | Perception | `/perception/target_relative` | Target position relative to the drone from the downward camera | During APPROACHING and DESCENDING |
-| Perception | `/perception/color_check` | `ColorCheck.msg` from BrainChip on the downward camera | APPROACHING to RETRIEVING |
+| Perception | `/perception/color_check` | `ColorCheck.msg` (placeholder): Perception's confirmed color from BrainChip on the downward camera; GNC reads only the color | APPROACHING to RETRIEVING |
 | Perception | `/perception/obstacle_detections` | Obstacle position, size | Continuous |
 | Perception | `/perception/heartbeat` | Alive, VIO and detector health | 5 Hz |
 | Hardware | `/hw/nfc/status` | idle, reading, fault | On change |
@@ -197,7 +197,7 @@ Comms owns `Intent`, `MissionState`, `NfcResult` and `LlmHeartbeat` in `avc_msgs
 | To | Topic | Type / contents | QoS |
 | --- | --- | --- | --- |
 | Everyone | `/mission/state` | `avc_msgs/MissionState`, 5 Hz and on every change or handled intent | Reliable, transient local, keep last 1 |
-| Comms | `/mission/nfc_result` | `avc_msgs/NfcResult`, every read attempt; republished each heartbeat until comms gives its verdict | Reliable, transient local, keep last 10 |
+| Comms | `/mission/nfc_result` | `avc_msgs/NfcResult`, every read attempt; republished each heartbeat until `last_nfc_read_id` on `/llm/heartbeat` echoes its `read_id` | Reliable, transient local, keep last 10 |
 | Everyone | `/mission/target` | Active color and centroid once known | Reliable, transient local |
 | Hardware | `/hw/nfc/command` | start, cancel | Reliable |
 | Hardware | `/hw/gripper/command` | open, close, release | Reliable |
@@ -221,7 +221,31 @@ One helper builds every MissionState: it bumps `seq`, sets `previous_state` (the
 
 **`avc_msgs/Intent`** actions: `update_only` (0, also the default when empty), `retrieve` (1), `read_chip` (2), `abort` (3), `pause` (4), `return_to_start` (5), `resume` (6). Other fields: `target_color`, `avoid_mask`, `stay_mask`, `until_mask`, `target_quadrant`, `header`, `intent_id`. `pause` and `abort` from a stop word arrive with every other field empty.
 
-**`ColorCheck.msg`** (Perception, in `avc_interfaces`):
+**`avc_msgs/LlmHeartbeat`** (comms' file, at `366e2ba`; published at 5 Hz):
+
+```
+std_msgs/Header header
+uint32 last_state_seq      # seq of the last /mission/state received, 0 if none
+uint32 last_nfc_read_id    # read_id of the last /mission/nfc_result received, 0 if none
+bool link_ok               # true while radio heartbeats arrive; false after link_timeout_s (default 3 s) with none
+```
+
+There is no verdict field: an NFC read is complete when `last_nfc_read_id` echoes its `read_id` (see READING notes and `read_complete()`).
+
+**`avc_msgs/NfcResult`** (comms' file, at `366e2ba`; GNC publishes it):
+
+```
+std_msgs/Header header
+uint32 read_id         # +1 per read attempt; comms skips read_ids it has already handled
+uint32 intent_id       # intent_id of the retrieve or read_chip intent this read belongs to
+string target_color    # blue | red | yellow | black
+bool success           # from the hardware result; decides the read's outcome once comms echoes read_id
+string payload         # the tag text; only meaningful when success is true
+```
+
+Comms relays only `success = true` reads to the leader.
+
+**`ColorCheck.msg`** (Perception, in `avc_interfaces`; PLACEHOLDER until Perception confirms its format. GNC reads only `color_guess`, as Perception's confirmed color, and ignores `confidence`):
 
 ```
 std_msgs/Header header
@@ -241,9 +265,10 @@ All fifteen SMACH states live in one file, `mission_manager_smach.py`, with no r
 
 gnc_offboard/gnc_offboard/
     mission/
-        context.py               # MissionContext, Inputs snapshot, state name constants from avc_msgs
+        state_names.py           # the only place state names live: STATE_* from avc_msgs, plus DESCENDING/LIFTOFF placeholders
+        context.py               # MissionContext, Inputs snapshot
         io.py                    # MissionIO abstract interface
-        checks.py                # pure functions: color window, staleness, centering error, touchdown, regions and until rules
+        checks.py                # pure functions: read_complete, check_color, staleness, centering error, touchdown, regions and until rules
         qos.py                   # every QoS profile in one place
         state_msg.py             # the one MissionState builder
         mission_manager_smach.py # MissionStateBase + all 15 states + build_state_machine(ctx, io, cfg)
@@ -252,7 +277,7 @@ gnc_offboard/gnc_offboard/
     ros/mission_manager_node.py  # subscriptions, timers, RosMissionIO, thread running sm.execute()
     sim/
         fake_intent.py           # CLI: any intent, including stop-word style with empty fields
-        fake_comms.py            # LLM heartbeat; echoes read_id and gives a success or failed verdict (scriptable)
+        fake_comms.py            # LLM heartbeat at 5 Hz; echoes last_nfc_read_id and last_state_seq, link_ok (scriptable: delay or withhold the echo)
         fake_hardware.py         # NFC reader + gripper stand-in with configurable failures per motor stage
         fake_dice_map.py         # Perception dice map + target-relative + color check from the world manifest
         fake_heartbeats.py       # Perception heartbeat
@@ -283,7 +308,6 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `camera_blind_height_m` | DESCENDING | 0.20 |
 | `touchdown_range_m`, `touchdown_hold_s` | DESCENDING | 0.05, 0.5 |
 | `descent_max_retries` | DESCENDING | 2 |
-| `color_conf_threshold`, `color_window` | Color check | 0.7, 5 |
 | `nfc_start_timeout_s` | NFC\_READY | 2.0 |
 | `nfc_tries_idle`, `nfc_tries_motors_off` | READING | 2, 2 |
 | `retrieval_enabled`, `gripper_timeout_s` | RETRIEVING | false, 10.0 |
@@ -294,7 +318,7 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `start_zone_size_m` | RETURNING, LANDING | 1.524 (5 ft) |
 | `field_north_axis` | Regions | +y |
 
-Placeholders are starting guesses for sim only, not agreed numbers. There is deliberately no timeout on comms' NFC verdict.
+Placeholders are starting guesses for sim only, not agreed numbers. There is deliberately no timeout on comms' echo of an NFC read. The color check has no GNC parameters: Perception owns its threshold and window.
 
 ## Sim stand-ins and testing
 
@@ -316,9 +340,9 @@ The state machine must be fully testable without Gazebo or PX4, then flown in PX
 | Pause | Pause and resume from STANDBY, PREFLIGHT (disarms), DESCENDING, LANDING and on the die; resume with no new intent returns to `paused_from`; new intent while paused resumes to SEARCHING (through LIFTOFF on the die); extra fields on `resume` are ignored |
 | Dice map | SEARCHING's entry check goes straight to APPROACHING when the map already has the target |
 | Descent | Stage-by-stage tolerance gating; retry on a large error or lost die; touchdown from the rangefinder |
-| NFC read | Stage 1 idle, stage 2 motors off, then LIFTOFF and re-descend, then hold; nothing moves on until comms' verdict; a late verdict for an earlier `read_id` still counts |
+| NFC read | Stage 1 idle, stage 2 motors off, then LIFTOFF and re-descend, then hold; nothing moves on until `last_nfc_read_id` echoes the `read_id`; success or failure comes from `NfcResult.success`; an echo of a different `read_id`, or from a heartbeat received before the result was published, does not complete the read |
 | Staleness | A heartbeat that stops updating triggers its failure path after the configured time |
-| Color check | One noisy frame does not change the result |
+| Color check | RIGHT when the confirmed color equals the target, WRONG when it differs, PENDING when missing or empty; PENDING never causes a transition; `confidence` is ignored |
 
 **Sim stand-ins (ROS nodes, sim only):** `fake_intent.py`, `fake_comms.py`, `fake_hardware.py`, `fake_dice_map.py` and `fake_heartbeats.py` (see File layout).
 
@@ -347,7 +371,7 @@ One milestone per PR. Each ends with `colcon build` clean and all tests green.
 4. **Intents and pause.** Intent handling, the three rejections, PAUSED and the resume rule, on the flight phases first.
 5. **Search and approach.** SEARCHING, APPROACHING, the dice map lookup, color check, retarget, with `fake_dice_map.py`.
 6. **Descent and liftoff.** DESCENDING and LIFTOFF, including re-arming after motors off. Run the landing-accuracy test.
-7. **NFC.** NFC\_READY and READING, both motor stages, the comms verdict wait, with `fake_hardware.py` and `fake_comms.py`.
+7. **NFC.** NFC\_READY and READING, both motor stages, the wait for comms' `read_id` echo, with `fake_hardware.py` and `fake_comms.py`.
 8. **Retrieve and return.** RETRIEVING, RETURNING, time thresholds, battery.
 9. **Regions.** Avoid, stay, until rules and target quadrant (after the encoding question is settled).
 10. **Launch and acceptance.** `mission.launch.py` with `sim:=true`, then the ten SITL runs.
@@ -360,9 +384,10 @@ Each change here is already folded into the sections above.
 | Team | Change | Affects |
 | --- | --- | --- |
 | Comms | Abhi's page (Nov 12): comms owns `avc_msgs`; new `resume` action; until ends an avoid as well as a stay; real `/mission/state` with `last_intent_id` and `last_intent_result`; QoS for all four comms topics; `intent_id` restarts at 1 with comms | Interfaces, Intent handling, PAUSED, Regions |
-| Comms | GNC moves on from a read only on comms' success or failed verdict | READING |
+| Comms | Option B (Nov 19): `LlmHeartbeat` has no verdict field. GNC moves on from a read when `last_nfc_read_id` echoes its `read_id`; the hardware's `NfcResult.success` decides the outcome. All in `read_complete()` | READING, Interfaces |
 | Perception | Perception owns the dice map (xyz centroid of each die); GNC keeps no die memory | SEARCHING, APPROACHING, DESCENDING |
 | Perception | BrainChip confirms color from the downward camera, which also drives the descent | Color check, DESCENDING |
+| Perception | Perception owns the color check end to end (BrainChip, window, threshold) and publishes a confirmed color. GNC reads only the color: RIGHT, WRONG or PENDING; no NOTHING result | Color check, APPROACHING, Config |
 | Hardware |  |  |
 | GNC | `mission_demo.py` retired; `mission_manager` is the main script | Context, Build order |
 | GNC | Land on the die before the read and the grab; two-stage read (motors idle, then off) | States, Transitions, Config |
@@ -374,7 +399,7 @@ The builder should code these behind a parameter or a clearly marked default, no
 **For Comms (Abhi)**
 
 - [ ] **DESCENDING and LIFTOFF:** add both to the `STATE_*` constants in `MissionState`.
-- [ ] **NFC verdict in `LlmHeartbeat`:** which field carries comms' success or failed verdict for a `read_id`? The outline assumes an echoed `read_id` plus a verdict.
+- [x] **NFC read completion:** decided Nov 19, option B. `LlmHeartbeat` has no verdict field; a read completes when `last_nfc_read_id` echoes its `read_id`, and `NfcResult.success` decides the outcome. If comms adds a verdict field later, only `read_complete()` changes.
 - [ ] **`/llm/heartbeat` QoS and `link_ok`:** his proposal is accepted on our side; confirm with him.
 - [ ] **Region encoding:** `avc_msgs/Intent` sends quadrant masks (NE 1, SE 2, SW 4, NW 8). Decoding is deferred.
 - [ ] **ABORTED behavior** (his question 5): he says abort was meant to return to start; the outline defaults to land in place. Must stay distinct from `return_to_start`.
@@ -384,7 +409,7 @@ The builder should code these behind a parameter or a clearly marked default, no
 
 - [ ] **Dice map:** topic name, message type and rate.
 - [ ] **Final approach:** rate and accuracy of `/perception/target_relative` below 1 m, and the camera blind height.
-- [ ] **Color threshold and window:** test data under venue lighting.
+- [ ] **Color confirmation (Perception's decision, not GNC's):** BrainChip's confidence threshold and window, from test data under venue lighting, and the final `ColorCheck.msg` format. GNC only reads the confirmed color.
 
 **For Hardware**
 

@@ -1,0 +1,132 @@
+"""MissionContext: the state shared by the ROS node and the SMACH worker thread.
+
+The node's subscription callbacks only call `update_input()` (store the whole latest message and
+its receive time; no decisions). States read a consistent `Inputs` snapshot and change mission
+fields under the lock. Nothing here imports rclpy.
+"""
+import dataclasses
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
+
+# Field names of Inputs, one per subscribed topic.
+INPUT_NAMES = (
+    'intent',              # /mission/intent              avc_msgs/Intent
+    'llm_heartbeat',       # /llm/heartbeat               avc_msgs/LlmHeartbeat
+    'dice_map',            # /perception/dice_map         avc_interfaces/DiceMap (placeholder)
+    'target_relative',     # /perception/target_relative  type TBD (Perception)
+    'color_check',         # /perception/color_check      avc_interfaces/ColorCheck (placeholder)
+    'obstacles',           # /perception/obstacle_detections  type TBD
+    'perception_heartbeat',  # /perception/heartbeat      type TBD
+    'nfc_status',          # /hw/nfc/status
+    'nfc_result',          # /hw/nfc/result
+    'gripper_status',      # /hw/gripper/status
+    'vehicle_status',      # /fmu/out/vehicle_status
+    'battery_status',      # /fmu/out/battery_status
+    'local_position',      # /fmu/out/vehicle_local_position
+    'land_detected',       # /fmu/out/vehicle_land_detected
+    'distance_sensor',     # /fmu/out/distance_sensor
+)
+
+
+@dataclass(frozen=True)
+class Stamped:
+    """A whole message plus the time it was received (seconds, monotonic clock)."""
+    msg: Any
+    rx_time: float
+
+
+@dataclass(frozen=True)
+class Inputs:
+    """Snapshot of the latest message on every input; None until the first one arrives."""
+    intent: Optional[Stamped] = None
+    llm_heartbeat: Optional[Stamped] = None
+    dice_map: Optional[Stamped] = None
+    target_relative: Optional[Stamped] = None
+    color_check: Optional[Stamped] = None
+    obstacles: Optional[Stamped] = None
+    perception_heartbeat: Optional[Stamped] = None
+    nfc_status: Optional[Stamped] = None
+    nfc_result: Optional[Stamped] = None
+    gripper_status: Optional[Stamped] = None
+    vehicle_status: Optional[Stamped] = None
+    battery_status: Optional[Stamped] = None
+    local_position: Optional[Stamped] = None
+    land_detected: Optional[Stamped] = None
+    distance_sensor: Optional[Stamped] = None
+
+
+assert tuple(f.name for f in dataclasses.fields(Inputs)) == INPUT_NAMES
+
+
+@dataclass
+class PendingNfcResult:
+    """An NfcResult published to comms and republished each heartbeat until echoed."""
+    msg: Any                 # avc_msgs/NfcResult
+    published_at: float      # first publish time; read_complete() ignores older heartbeats
+
+
+@dataclass
+class MissionContext:
+    """Shared mission state. Hold `lock` for any read-modify-write of the mission fields."""
+
+    # Inputs (written only by update_input).
+    _inputs: Dict[str, Optional[Stamped]] = field(
+        default_factory=lambda: {name: None for name in INPUT_NAMES})
+
+    # Mission.
+    active_target: str = ''                  # blue | red | yellow | black, '' if none
+    regions: Any = None                      # active regions and until rules: Milestone 9
+    mission_start_time: Optional[float] = None
+    start_position: Optional[Any] = None     # recorded in PREFLIGHT, field frame
+
+    # State bookkeeping (state names come from state_names.py).
+    state: str = ''
+    previous_state: str = ''
+    reason: str = ''
+    paused_from: str = ''
+    stored_intent: Optional[Stamped] = None  # newest intent received while PAUSED
+    after_liftoff: str = ''                  # where LIFTOFF goes next
+
+    # Retries and on-die progress.
+    descent_retries: int = 0
+    motor_stage: int = 1                     # 1 = armed at idle, 2 = motors off
+    nfc_tries: Dict[int, int] = field(default_factory=lambda: {1: 0, 2: 0})
+    redescended: bool = False                # both motor stages failed once already
+
+    # Commands.
+    setpoint: Optional[Any] = None           # streamed to PX4 by the node at setpoint_hz
+
+    # Intents.
+    last_intent_id: int = 0
+    last_intent_result: str = ''
+
+    # NFC reads.
+    read_id: int = 0                         # last read_id handed out
+    pending_nfc: Dict[int, PendingNfcResult] = field(default_factory=dict)
+
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    def update_input(self, name: str, msg: Any, now: float) -> None:
+        """Store the latest message on input `name` with its receive time. Callbacks call only this."""
+        if name not in self._inputs:
+            raise KeyError(f'unknown input {name!r}')
+        stamped = Stamped(msg, now)
+        with self.lock:
+            self._inputs[name] = stamped
+
+    def snapshot(self) -> Inputs:
+        """A consistent copy of the latest inputs, safe to use outside the lock."""
+        with self.lock:
+            return Inputs(**self._inputs)
+
+    def mission_time_s(self, now: float) -> float:
+        """Seconds since the mission started; 0 before it starts. Keeps running while paused."""
+        with self.lock:
+            return 0.0 if self.mission_start_time is None else now - self.mission_start_time
+
+    def next_read_id(self) -> int:
+        """Hand out a new read_id (+1 per read attempt)."""
+        with self.lock:
+            self.read_id += 1
+            return self.read_id
