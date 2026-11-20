@@ -5,8 +5,8 @@ from conftest import (flight, heartbeat, AUTO_LAND, OFFBOARD, POSCTL, battery, i
                       status)
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.mission_manager_smach import (
-    MISSION_ABORTED, MISSION_COMPLETE, PREEMPTED, AbortCause, Aborted, TargetHover, Landing,
-    Preflight, ReturnConfirmed, Standby, Takeoff, TRANSITIONS, build_state_machine)
+    MISSION_ABORTED, MISSION_COMPLETE, PREEMPTED, AbortCause, Aborted, Landing,
+    Preflight, ReturnConfirmed, Standby, Takeoff, build_state_machine)
 
 START = (1.0, 2.0, -0.1, 0.5)   # PX4 NED start position + yaw
 
@@ -130,24 +130,6 @@ def test_takeoff_climbs_from_start_to_search_altitude(ctx, io, cfg, clock, feed)
     assert clock.now() - t0 == pytest.approx(2.0, abs=0.06)
 
 
-# ---- TARGET_HOVER (temporary) -------------------------------------------------------------------
-
-def test_target_hover_returns_after_hover_time(ctx, io, cfg, clock, feed):
-    airborne(ctx, feed, clock)
-    t0 = clock.now()
-    assert run(TargetHover, ctx, io, cfg, clock) == 'return'
-    assert ctx.pending_reason == 'target confirmed: landing (temporary)'
-    assert clock.now() - t0 == pytest.approx(cfg.target_hover_s, abs=0.06)
-    assert io.calls == []                         # keeps APPROACHING's setpoint over the die
-
-
-def test_target_hover_is_temporary_and_lands():
-    assert TRANSITIONS[S.APPROACHING]['over_target'] == S.TARGET_HOVER
-    assert TRANSITIONS[S.TARGET_HOVER]['return'] == S.LANDING
-    assert TRANSITIONS[S.TAKEOFF]['at_altitude'] == S.SEARCHING
-    assert S.TARGET_HOVER not in S.ALL
-
-
 # ---- LANDING ------------------------------------------------------------------------------------
 
 def landing_setup(ctx, feed, clock):
@@ -226,14 +208,14 @@ def test_return_confirmed_stops_commands(ctx, io, cfg, clock):
 
 def test_aborted_px4_control_stops_commanding_at_once(ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock, nav=POSCTL)
-    ctx.abort_cause, ctx.abort_from = AbortCause.PX4_CONTROL.value, S.TARGET_HOVER
+    ctx.abort_cause, ctx.abort_from = AbortCause.PX4_CONTROL.value, S.SEARCHING
     assert run(Aborted, ctx, io, cfg, clock) == MISSION_ABORTED
     assert io.names() == ['clear_setpoint']
 
 
 def test_aborted_airborne_holds_then_lands_in_place(ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock, z=-1.6)
-    ctx.abort_cause, ctx.abort_from = AbortCause.INTENT.value, S.TARGET_HOVER
+    ctx.abort_cause, ctx.abort_from = AbortCause.INTENT.value, S.SEARCHING
     t0 = clock.now()
 
     def px4_lands():
@@ -286,32 +268,43 @@ def test_full_flight_standby_to_return_confirmed(ctx, io, cfg, clock, fake_px4,
     sm = build_state_machine(ctx, io, cfg, clock)
     assert sm.execute() == MISSION_COMPLETE
     assert transitions(io) == [S.STANDBY, S.PREFLIGHT, S.TAKEOFF, S.SEARCHING, S.APPROACHING,
-                               S.TARGET_HOVER, S.LANDING, S.RETURN_CONFIRMED]
+                               S.DESCENDING, S.ON_DIE_TEST, S.LIFTOFF, S.RETURNING, S.LANDING,
+                               S.RETURN_CONFIRMED]
     assert ctx.state == S.RETURN_CONFIRMED and ctx.previous_state == S.LANDING
     assert ctx.reason == 'landed and disarmed'
     assert io.setpoint is None
 
 
-def test_full_flight_abort_intent_while_hovering(ctx, io, cfg, clock, fake_px4, fake_perception):
+def test_full_flight_abort_intent_while_approaching(ctx, io, cfg, clock, fake_px4, fake_perception):
     px4, _ = flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'red')
 
     def abort_when_hovering(now):
-        if ctx.state == S.TARGET_HOVER and not ctx.intent_queue and ctx.last_intent_id == 1:
+        if ctx.state == S.APPROACHING and not ctx.intent_queue and ctx.last_intent_id == 1:
             ctx.update_input('intent', intent('abort', '', 2), now)
     clock.hooks.append(abort_when_hovering)
     assert build_state_machine(ctx, io, cfg, clock).execute() == MISSION_ABORTED
-    assert transitions(io)[-2:] == [S.TARGET_HOVER, S.ABORTED]
+    assert transitions(io)[-2:] == [S.APPROACHING, S.ABORTED]
     assert (ctx.last_intent_id, ctx.last_intent_result) == (2, 'applied')
     assert ctx.reason == 'abort intent'
     assert not px4.armed and px4.landed           # held, then landed in place
 
 
 def test_full_flight_with_pilot_arm(ctx, io, make_cfg, clock, fake_px4, fake_perception, feed):
+    """The pilot arms for takeoff, and again for LIFTOFF after PX4's auto-disarm on the die;
+    GNC never sends arm."""
     cfg = make_cfg(require_pilot_arm=True)
     px4, _ = flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'black')
     feed.at(6.0, px4.pilot_arm)
+    rearmed = []
+
+    def pilot_rearms_on_the_die(now):
+        if ctx.state == S.LIFTOFF and not px4.armed and not rearmed:
+            rearmed.append(now)
+            px4.pilot_arm()
+    clock.hooks.append(pilot_rearms_on_the_die)
     assert build_state_machine(ctx, io, cfg, clock).execute() == MISSION_COMPLETE
     assert 'arm' not in io.names()
+    assert rearmed                                  # LIFTOFF waited for the pilot on the die
 
 
 def test_preempt_stops_the_machine(ctx, io, cfg, clock):

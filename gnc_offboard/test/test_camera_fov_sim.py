@@ -20,7 +20,8 @@ def node(tmp_path):
     from gnc_offboard.camera_fov import CameraFov
     rclpy.init(args=['--ros-args', '-p', f'manifest:={TEST_MANIFEST}',
                      '-p', f'cameras_file:={CAMERAS_YAML}', '-p', 'gazebo_markers:=false',
-                     '-p', f'output:={tmp_path / "coverage.json"}'])
+                     '-p', f'output:={tmp_path / "coverage.json"}',
+                     '-p', 'target_relative_noise_m:=0.0'])
     try:
         n = CameraFov()
     except Exception:
@@ -178,3 +179,88 @@ def test_coverage_json_still_works_with_compare_and_plot(node, tmp_path):
                           str(path), str(path)], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert 'coverage' in out.stdout.lower()
+
+
+# ---- Milestone 6: blind height, noise, rangefinder stand-in -------------------------------------
+
+def test_no_target_relative_or_color_below_the_blind_height(node):
+    from avc_interfaces.msg import MissionTarget
+    from gnc_offboard.mission.cameras import load_blind_height
+    assert node.blind_height_m == load_blind_height(CAMERAS_YAML) == 0.20
+    t = MissionTarget()
+    t.known, t.centroid.x, t.centroid.y = True, 2.0, 2.0
+    node.on_target(t)
+    fly(node, 2.0, 2.0, 0.3)
+    node.detect()
+    assert node.sent['rel_pub'][-1].valid and node.sent['color_pub'][-1].color_guess == 'red'
+    colors = len(node.sent['color_pub'])
+    fly(node, 2.0, 2.0, 0.15)            # below the blind height
+    node.detect()
+    assert node.sent['rel_pub'][-1].valid is False and len(node.sent['color_pub']) == colors
+
+
+def test_target_relative_noise(tmp_path):
+    from avc_interfaces.msg import MissionTarget
+    from gnc_offboard.camera_fov import CameraFov
+    rclpy.init(args=['--ros-args', '-p', f'manifest:={TEST_MANIFEST}',
+                     '-p', f'cameras_file:={CAMERAS_YAML}', '-p', 'gazebo_markers:=false',
+                     '-p', 'noise_seed:=3'])
+    try:
+        n = CameraFov()
+        assert n.get_parameter('target_relative_noise_m').value == 0.02
+        sent = []
+        n.rel_pub.publish = sent.append
+        t = MissionTarget()
+        t.known, t.centroid.x, t.centroid.y = True, 2.0, 2.0
+        n.on_target(t)
+        fly(n, 2.0, 2.0, 1.0)
+        for _ in range(200):
+            n.detect()
+        xs = [m.offset.x for m in sent]
+        mean = sum(xs) / len(xs)
+        std = (sum((x - mean) ** 2 for x in xs) / len(xs)) ** 0.5
+        assert abs(mean) < 0.01 and std == pytest.approx(0.02, abs=0.005)
+        n.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+
+def test_rangefinder_stand_in(node):
+    from px4_msgs.msg import DistanceSensor
+    from gnc_offboard.mission import qos
+    sent = []
+    node.range_pub.publish = sent.append
+    fly(node, 0.0, 0.0, 1.5)
+    node.publish_range()
+    m = sent[-1]
+    assert m.current_distance == pytest.approx(1.5, abs=0.03)
+    assert m.orientation == DistanceSensor.ROTATION_DOWNWARD_FACING and m.signal_quality == 100
+    assert node.range_pub.topic_name == '/fmu/out/distance_sensor'
+    assert node.range_pub.qos_profile == qos.PX4      # same QoS mission_manager subscribes with
+
+
+def test_landing_accuracy_tool_records_touchdowns():
+    import importlib.util
+    from avc_msgs.msg import MissionState
+    from px4_msgs.msg import VehicleOdometry
+    spec = importlib.util.spec_from_file_location('landing_accuracy',
+                                                  REPO / 'tools' / 'landing_accuracy.py')
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    rclpy.init()
+    try:
+        node = tool.LandingAccuracy(TEST_MANIFEST, 2, '/fmu/out/vehicle_odometry')
+        for offset in (0.01, 0.03):
+            odom = VehicleOdometry()
+            n, e, _ = node.frame.to_ned(2.0 + offset, 2.0)
+            odom.position = [float(n), float(e), 0.0]
+            node.on_odom(odom)
+            for state in ('DESCENDING', 'ON_DIE_TEST', 'LIFTOFF'):
+                m = MissionState()
+                m.state, m.active_target = state, 'red'
+                node.on_state(m)
+        assert node.done and node.offsets == pytest.approx([0.01, 0.03], abs=1e-5)
+        assert 'mean offset 2.0 cm, worst 3.0 cm' in node.summary()
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()

@@ -19,6 +19,7 @@ from gnc_offboard.frames import FieldFrame
 CAMERA_NAMES = ('d455', 'down')
 DOWN = 'down'
 _FIELDS = tuple(f.name for f in dataclasses.fields(CameraModel))
+_EXTRA = ('blind_height_m',)      # camera properties that are not CameraModel geometry
 
 
 def default_cameras_path() -> str:
@@ -34,20 +35,33 @@ def default_cameras_path() -> str:
     return str(Path(__file__).resolve().parents[2] / 'config' / 'cameras.yaml')
 
 
-def load_cameras(path: Optional[Union[str, Path]] = None) -> Dict[str, CameraModel]:
-    """{'d455': CameraModel, 'down': CameraModel}. Every CameraModel field must be given."""
+def _camera_entries(path):
     data = yaml.safe_load(Path(path or default_cameras_path()).read_text())
     cameras = data.get('cameras', {})
     if set(cameras) != set(CAMERA_NAMES):
         raise ValueError(f'cameras file must define exactly {CAMERA_NAMES}, got {sorted(cameras)}')
-    out = {}
     for name in CAMERA_NAMES:
         values = cameras[name]
-        missing, extra = set(_FIELDS) - set(values), set(values) - set(_FIELDS)
+        missing = set(_FIELDS) - set(values)
+        extra = set(values) - set(_FIELDS) - set(_EXTRA)
         if missing or extra:
             raise ValueError(f'camera {name}: missing {sorted(missing)}, unknown {sorted(extra)}')
-        out[name] = CameraModel(**{k: float(values[k]) for k in _FIELDS})
-    return out
+    return cameras
+
+
+def load_cameras(path: Optional[Union[str, Path]] = None) -> Dict[str, CameraModel]:
+    """{'d455': CameraModel, 'down': CameraModel}. Every CameraModel field must be given."""
+    cameras = _camera_entries(path)
+    return {name: CameraModel(**{k: float(cameras[name][k]) for k in _FIELDS})
+            for name in CAMERA_NAMES}
+
+
+def load_blind_height(path: Optional[Union[str, Path]] = None) -> float:
+    """The down camera's blind height (m): below it the camera cannot see the die."""
+    value = float(_camera_entries(path)[DOWN].get('blind_height_m', 0.0))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f'down.blind_height_m must be >= 0, got {value}')
+    return value
 
 
 def footprints(cameras: Dict[str, CameraModel], position_ned: Sequence[float],

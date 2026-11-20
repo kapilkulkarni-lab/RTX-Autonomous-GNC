@@ -2,15 +2,15 @@
 must not fire."""
 import pytest
 
-from conftest import (heartbeat, AUTO_LAND, OFFBOARD, POSCTL, battery, intent, land_detected, position,
+from conftest import (Hover, heartbeat, AUTO_LAND, OFFBOARD, POSCTL, battery, intent, land_detected, position,
                       status)
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.mission_manager_smach import (
-    ABORTED_OUT, PAUSE_OUT, RETURN_OUT, STATE_CLASSES, TRANSITIONS, AbortCause, TargetHover, Landing,
+    ABORTED_OUT, PAUSE_OUT, RETURN_OUT, STATE_CLASSES, TRANSITIONS, AbortCause, Landing,
     Preflight, Standby, Takeoff)
 
 START = (0.0, 0.0, 0.0, 0.0)
-FLYING = [Takeoff, TargetHover, Landing]     # airborne states in this milestone
+FLYING = [Takeoff, Hover, Landing]     # airborne states in this milestone
 
 
 def fly(ctx, feed, clock, cls):
@@ -44,7 +44,7 @@ def test_px4_faults_abort_everywhere_airborne(cls, fault, reason, ctx, io, cfg, 
     assert ctx.pending_reason == reason
 
 
-@pytest.mark.parametrize('cls', [Takeoff, TargetHover])
+@pytest.mark.parametrize('cls', [Takeoff, Hover])
 @pytest.mark.parametrize('new_status, reason', [
     (status(True, POSCTL), 'offboard lost: pilot or PX4 took control'),
     (status(True, AUTO_LAND), 'offboard lost: pilot or PX4 took control'),
@@ -58,10 +58,10 @@ def test_offboard_lost_or_disarm_aborts(cls, new_status, reason, ctx, io, cfg, c
 
 
 def test_link_lost_after_stale_time_only(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.at(1.0, lambda: feed.stop('vehicle_status'))
     t0 = clock.now()
-    assert run(TargetHover, ctx, io, cfg, clock) == ABORTED_OUT
+    assert run(Hover, ctx, io, cfg, clock) == ABORTED_OUT
     assert clock.now() - t0 == pytest.approx(1.0 + cfg.px4_status_stale_s, abs=0.06)
 
 
@@ -86,7 +86,7 @@ def test_not_offboard_is_fine_before_offboard_engaged(ctx, io, cfg, clock, fake_
 
 # ---- 2. abort intent ----------------------------------------------------------------------------
 
-@pytest.mark.parametrize('cls', [Standby, Preflight, Takeoff, TargetHover, Landing])
+@pytest.mark.parametrize('cls', [Standby, Preflight, Takeoff, Hover, Landing])
 def test_abort_intent_from_every_state(cls, ctx, io, cfg, clock, feed):
     if cls in FLYING:
         fly(ctx, feed, clock, cls)
@@ -129,19 +129,19 @@ def test_position_invalid_aborts_after_limit(cls, ctx, io, cfg, clock, feed):
 
 
 def test_short_position_dropout_is_tolerated(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.at(1.0, lambda: feed.set(local_position=position(z=-1.5, valid=False)))
     feed.at(1.0 + cfg.pose_invalid_s / 2, lambda: feed.set(local_position=position(z=-1.5)))
     feed.at(3.0, lambda: feed.set(local_position=position(z=-1.5, valid=False)))
     feed.at(3.0 + cfg.pose_invalid_s / 2, lambda: feed.set(local_position=position(z=-1.5)))
-    assert run(TargetHover, ctx, io, cfg, clock) == RETURN_OUT
+    assert run(Hover, ctx, io, cfg, clock) == RETURN_OUT
     assert ctx.pending_reason.startswith('target confirmed')   # its own end, no check fired
 
 
 def test_stale_position_aborts(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.at(1.0, lambda: feed.stop('local_position'))
-    assert run(TargetHover, ctx, io, cfg, clock) == ABORTED_OUT
+    assert run(Hover, ctx, io, cfg, clock) == ABORTED_OUT
     assert ctx.abort_cause == AbortCause.POSE.value
 
 
@@ -156,7 +156,7 @@ def test_position_check_not_on_ground(ctx, io, cfg, clock, feed):
 
 # ---- 4. battery ---------------------------------------------------------------------------------
 
-@pytest.mark.parametrize('cls', [Takeoff, TargetHover])
+@pytest.mark.parametrize('cls', [Takeoff, Hover])
 def test_low_battery_returns(cls, ctx, io, cfg, clock, feed):
     fly(ctx, feed, clock, cls)
     feed.at(1.0, lambda: feed.set(battery_status=battery(cfg.battery_return_pct / 100 - 0.01)))
@@ -174,9 +174,9 @@ def test_low_battery_ignored_while_landing(ctx, io, cfg, clock, feed):
 
 @pytest.mark.parametrize('remaining', [-1.0, float('nan')])
 def test_unknown_battery_ignored(remaining, ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.set(battery_status=battery(remaining))
-    assert run(TargetHover, ctx, io, cfg, clock) == RETURN_OUT
+    assert run(Hover, ctx, io, cfg, clock) == RETURN_OUT
     assert ctx.pending_reason.startswith('target confirmed')   # its own end, no check fired
 
 
@@ -190,7 +190,7 @@ def test_battery_not_checked_on_ground(ctx, io, cfg, clock, fake_px4, feed):
 
 # ---- 5. mission clock ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('cls', [Preflight, Takeoff, TargetHover])
+@pytest.mark.parametrize('cls', [Preflight, Takeoff, Hover])
 def test_mission_clock_forces_return(cls, ctx, io, cfg, clock, feed):
     if cls is Preflight:
         feed.set(vehicle_status=status(False), local_position=position(valid=False))
@@ -217,48 +217,55 @@ def test_mission_clock_not_running_in_standby(ctx, io, cfg, clock, feed):
 # ---- priority -----------------------------------------------------------------------------------
 
 def test_priority_px4_before_abort_intent(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.set(vehicle_status=status(True, OFFBOARD, failsafe=True))
     ctx.update_input('intent', intent('abort', '', 3), clock.now())
-    assert run(TargetHover, ctx, io, cfg, clock) == ABORTED_OUT
+    assert run(Hover, ctx, io, cfg, clock) == ABORTED_OUT
     assert ctx.abort_cause == AbortCause.PX4_CONTROL.value
     assert len(ctx.intent_queue) == 1             # abort intent not consumed here
 
 
 def test_priority_abort_intent_before_return(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.set(battery_status=battery(0.01))
     ctx.mission_start_time = clock.now() - 10 * cfg.force_return_at_s
     ctx.update_input('intent', intent('abort', '', 3), clock.now())
-    assert run(TargetHover, ctx, io, cfg, clock) == ABORTED_OUT
+    assert run(Hover, ctx, io, cfg, clock) == ABORTED_OUT
     assert ctx.abort_cause == AbortCause.INTENT.value
 
 
 def test_priority_pose_before_battery(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.set(battery_status=battery(0.01))
     feed.stop('local_position')
     clock.t += 2 * cfg.pose_invalid_s             # position already stale on the first loop
     feed.tick(clock.now())                        # everything else fresh
-    assert run(TargetHover, ctx, io, cfg, clock) == ABORTED_OUT
+    assert run(Hover, ctx, io, cfg, clock) == ABORTED_OUT
     assert ctx.abort_cause == AbortCause.POSE.value
 
 
 def test_priority_battery_before_clock(ctx, io, cfg, clock, feed):
-    fly(ctx, feed, clock, TargetHover)
+    fly(ctx, feed, clock, Hover)
     feed.set(battery_status=battery(0.01))
     ctx.mission_start_time = clock.now() - 10 * cfg.force_return_at_s
-    assert run(TargetHover, ctx, io, cfg, clock) == RETURN_OUT
+    assert run(Hover, ctx, io, cfg, clock) == RETURN_OUT
     assert ctx.pending_reason.startswith('battery')
 
 
 # ---- wiring -------------------------------------------------------------------------------------
 
-def test_return_goes_to_landing_for_now():
-    """TEMPORARY until Milestone 8 (RETURNING)."""
+def test_return_wiring():
+    """Flying: RETURNING. On the die: LIFTOFF first. PREFLIGHT (ground): LANDING (stop, disarm).
+    PAUSED: by where it paused."""
+    from gnc_offboard.mission.mission_manager_smach import RETURN_GROUND, RETURN_LIFTOFF
     for name, targets in TRANSITIONS.items():
-        if RETURN_OUT in targets:
-            assert targets[RETURN_OUT] == S.LANDING, name
+        if RETURN_OUT not in targets:
+            continue
+        expected = {S.PREFLIGHT: S.LANDING, S.ON_DIE_TEST: S.LIFTOFF}.get(name, S.RETURNING)
+        assert targets[RETURN_OUT] == expected, name
+    assert TRANSITIONS[S.PAUSED][RETURN_GROUND] == S.LANDING
+    assert TRANSITIONS[S.PAUSED][RETURN_LIFTOFF] == S.LIFTOFF
+    assert RETURN_OUT not in TRANSITIONS[S.RETURNING]          # already returning
 
 
 def test_global_outcomes_registered_and_wired(ctx, io, cfg, clock):

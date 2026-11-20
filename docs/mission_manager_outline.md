@@ -75,11 +75,11 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 | 3 | TAKEOFF | Setpoint = start position at search altitude | Check altitude within tolerance | `at_altitude` |
 | 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise plan the search pattern at `search_altitude_m` (`search_pattern`: `lawnmower` by default, rows along `search_rows_along`, row spacing = the down camera's footprint width across the rows at search altitude x (1 - `search_overlap`), rows already covered skipped; `frontier` and `zone_sweep` selectable for comparison), routing around obstacles, and any target quadrant first. The search holds the start heading | Follow pattern; mark covered cells with both cameras' projected footprints (from PX4 odometry position and attitude); leave when the dice map reports the active color. Whole field covered without the target: clear the coverage memory and search again (`reason`: "target not found, searching again") | `target_known`, `target_found` |
 | 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map, at `search_altitude_m`, then straight down to `hover_height_m` | Center over the die on `/perception/target_relative` (within `approach_center_tol_m`); run the color check from the downward camera, using only colors confirmed since arriving | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `lost` → SEARCHING (color PENDING keeps waiting). `lost`: no `target_relative` for `target_lost_s`, or no confirmed color `color_confirm_timeout_s` after arriving; counts one failure for that die (excluded after `max_die_attempts`; a confirmed wrong color excludes it at once) |
-| 6 | DESCENDING | Lock the touchdown point to the centroid's x/y | Descend in stages at TBD m/s; at each stage re-center on Perception's target-relative position and only continue while the sideways error is under that stage's tolerance; re-check color while the die is in view; below the camera blind height finish on the last good centering plus rangefinder and EKF; confirm touchdown from the rangefinder, not only PX4's land detector | `touchdown`, `retry` (error too large or die lost: climb to hover height and try again), `failed` (retries used) → APPROACHING |
+| 6 | DESCENDING | Lock the touchdown point to the centroid's x/y | Descend in stages at TBD m/s; at each stage re-center on Perception's target-relative position and only continue while the sideways error is under that stage's tolerance; re-check color while the die is in view; below the camera blind height finish on the last good centering plus rangefinder and EKF; confirm touchdown from the rangefinder, not only PX4's land detector | `touchdown`, `retry` (error too large for `stage_settle_s` or die lost for `target_lost_s`: climb to hover height and try again), `failed` (retries used: one failure for the die toward `max_die_attempts`; or a confirmed wrong color: the die is excluded at once) → APPROACHING. Stages `descent_stages_m` / `stage_lateral_tol_m`, the last within `reader_lateral_tol_m`; blind height is the down camera's `blind_height_m` (cameras.yaml); touchdown = rangefinder at or under `touchdown_range_m` for `touchdown_hold_s` |
 | 7 | NFC\_READY | On the die. Motor stage 1: stay armed at idle (minimum throttle). Stage 2: disarm. Send `/hw/nfc/command` start | Wait for NFC status `reading` | `read_started`, `timeout` |
 | 8 | READING | Stay landed in the current motor stage | Wait for `/hw/nfc/result`; publish it on `/mission/nfc_result` with a new `read_id`; then wait until `/llm/heartbeat` echoes that `read_id` (`read_complete()`). The hardware result (`NfcResult.success`) decides success or failure. No timeout (global checks still apply) | `success_retrieve`, `success_return`, `failed_retry` (same stage), `failed_motors_off` (stage 1 used up → disarm, NFC\_READY), `failed_redescend` (stage 2 used up, first time → LIFTOFF then DESCENDING), `failed_hold` |
 | 9 | RETRIEVING | Re-run the color check if the camera still sees the die; send gripper close | Wait for gripper `holding` | `holding`, `failed` (both → LIFTOFF, then RETURNING) |
-| 10 | LIFTOFF | Re-arm and re-enter offboard if disarmed | Climb straight off the die to hover height | `to_descending`, `to_searching`, `to_approaching`, `to_returning` (chosen from the context) |
+| 10 | LIFTOFF | Re-arm and re-enter offboard if disarmed (PX4 auto-disarms on the die after `COM_DISARM_LAND`, in offboard too). With `require_pilot_arm`, wait for the pilot to arm (no timeout); otherwise arm / offboard refused for `arm_timeout_s` → ABORTED (on the die: disarm and stay) | Climb straight off the die to hover height. Until off the die, a `return` or retarget only changes where LIFTOFF goes next | `to_descending`, `to_searching`, `to_approaching`, `to_returning` (chosen from the context) |
 | 11 | RETURNING | Plan path to start zone center | Follow path | `over_start` |
 | 12 | LANDING | Command land inside the start zone | Wait for landed and disarmed | `landed` |
 | 13 | RETURN\_CONFIRMED | Stop commands | Terminal | `mission_complete` |
@@ -101,8 +101,8 @@ Each is marked TEMPORARY in the code and removed by the milestone named.
 
 | Stand-in | Behavior now | Replaced in |
 | --- | --- | --- |
-| TARGET\_HOVER state | After APPROACHING's `over_target`: hover over the die `target_hover_s`, then `return` (LANDING in place). Published as "TARGET\_HOVER" on `/mission/state`; pausable; retargets like DESCENDING | Milestone 6 (DESCENDING) |
-| `return` outcome | LANDING in place (the drone has not left the start position yet) | Milestone 8 (RETURNING) |
+| ON\_DIE\_TEST state | After DESCENDING's `touchdown`: stay on the die `on_die_test_s` with no arming change, then LIFTOFF → RETURNING. Published as "ON\_DIE\_TEST"; an on-die state (abort: disarm and stay; return, retarget, new intent after pause: LIFTOFF first). With `descent_test_count` > 1, LIFTOFF → DESCENDING again until that many touchdowns (landing-accuracy runs) | Milestone 7 (NFC\_READY, READING) |
+| RETURNING | The simple version: climb to search altitude, fly around obstacles to the start zone center, then LANDING. Battery and time thresholds as they are | Milestone 8 |
 | `update_only` and region fields | Stored, no behavior; every dice-map position fits the intent (no target-quadrant or avoid check in SEARCHING's entry check or APPROACHING) | Milestone 9 |
 | `read_chip` | Always rejected ("not on the die"): no on-die states yet | Milestone 7 |
 
@@ -121,7 +121,7 @@ Wire these as the SMACH `transitions={...}` map for each state. Global outcomes 
 | APPROACHING | `over_target` | At hover height over the centroid, centered, color check right | DESCENDING |
 | APPROACHING | `wrong_color_known` | Color check wrong; the target color is elsewhere in the dice map | APPROACHING (new goal) |
 | APPROACHING | `wrong_color_unknown`, `lost` | Color check WRONG with target not in the map; or no `target_relative` for `target_lost_s`; or no confirmed color `color_confirm_timeout_s` after arriving | SEARCHING |
-| DESCENDING | `touchdown` | Touchdown confirmed over the centroid | NFC\_READY (motor stage 1) |
+| DESCENDING | `touchdown` | Touchdown confirmed over the centroid | NFC\_READY (motor stage 1); ON\_DIE\_TEST until Milestone 7 |
 | DESCENDING | `retry` | Sideways error over tolerance or die lost; retries left | DESCENDING (after climbing to hover height) |
 | DESCENDING | `failed` | Descent retries used | APPROACHING |
 | NFC\_READY | `read_started` | NFC status `reading` | READING |
@@ -202,7 +202,8 @@ Comms owns `Intent`, `MissionState`, `NfcResult` and `LlmHeartbeat` in `avc_msgs
 | Hardware | `/hw/nfc/status` | idle, reading, fault | On change |
 | Hardware | `/hw/nfc/result` | success or failed, message text | After each read |
 | Hardware | `/hw/gripper/status` | open, closed, holding, fault | On change |
-| PX4 | `/fmu/out/vehicle_status`, `battery_status`, `vehicle_local_position`, `vehicle_land_detected`, `distance_sensor` | Arming, nav state, failsafe, battery, fused position, landed, rangefinder | Best effort |
+| PX4 | `/fmu/out/vehicle_status`, `battery_status`, `vehicle_local_position`, `vehicle_land_detected`, `vehicle_odometry` | Arming, nav state, failsafe, battery, fused position (and `dist_bottom`), landed, attitude for camera footprints | Best effort |
+| Rangefinder | `rangefinder_source`: `distance_sensor` (`px4_msgs/DistanceSensor` on `rangefinder_topic`, default `/fmu/out/distance_sensor`; PX4's DDS bridge does not export it, so in SITL camera_fov publishes a stand-in from odometry height) or `dist_bottom` (`vehicle_local_position.dist_bottom` when `dist_bottom_valid`: hardware, no firmware change) | Touchdown | Best effort |
 
 **Outputs from mission\_manager**
 
@@ -304,7 +305,9 @@ gnc_offboard/gnc_offboard/
                                  # (/camera/searched, Gazebo markers, JSON), /camera/target_detection, and the
                                  # Perception stand-in: dice map (either camera), target_relative and color check
                                  # (down camera), obstacles and heartbeat (wrong_color_first, drop_detections, heartbeat)
+                                 # and the rangefinder stand-in (blind height, target_relative_noise_m)
     camera_model.py              # CameraModel (projection) and CoverageGrid (the coverage memory)
+tools/landing_accuracy.py        # SITL: offset of every touchdown from the die's true centroid
 
 gnc_offboard/config/mission.yaml
 gnc_offboard/config/cameras.yaml        # the one camera config (d455, down)
@@ -332,7 +335,6 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `color_confirm_timeout_s` | APPROACHING (no confirmed color after arriving) | 5.0 (TBD) |
 | `approach_center_tol_m`, `die_match_radius_m` | APPROACHING | 0.10, 0.3 (TBD) |
 | `max_die_attempts` | APPROACHING, SEARCHING (lost / never-confirmed die skipped after this many failures) | 2 (TBD) |
-| `target_hover_s` | TARGET\_HOVER (temporary) | 5.0 |
 | `search_pattern`, `search_rows_along` | SEARCHING | `lawnmower` (`frontier`, `zone_sweep` for comparison), `x` |
 | `cameras_file` | Coverage, row spacing (and camera_fov) | '' = installed `config/cameras.yaml` |
 | `search_overlap`, `coverage_cell_m`, `wall_margin_m`, `obstacle_clearance_m` | SEARCHING, APPROACHING | 0.2 (of the down footprint width), 0.5, 1.0, 0.5 |
@@ -344,7 +346,10 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `descent_rate_mps` | DESCENDING | 0.15 |
 | `stage_lateral_tol_m` | DESCENDING | \[0.10, 0.05, 0.03\] |
 | `reader_lateral_tol_m` | DESCENDING (final) | 0.02 |
-| `camera_blind_height_m` | DESCENDING | 0.20 |
+| down camera `blind_height_m` (cameras.yaml) | DESCENDING, camera_fov | 0.20 (TBD) |
+| `stage_settle_s` | DESCENDING (time to get within a stage's tolerance before a retry) | 3.0 (TBD) |
+| `rangefinder_source`, `rangefinder_topic` | DESCENDING touchdown | `distance_sensor` (SITL) or `dist_bottom` (hardware), `/fmu/out/distance_sensor` |
+| `on_die_test_s`, `descent_test_count` | ON\_DIE\_TEST (temporary) | 5.0, 1 |
 | `touchdown_range_m`, `touchdown_hold_s` | DESCENDING | 0.05, 0.5 |
 | `descent_max_retries` | DESCENDING | 2 |
 | `nfc_start_timeout_s` | NFC\_READY | 2.0 |
@@ -458,10 +463,11 @@ The builder should code these behind a parameter or a clearly marked default, no
 **For Hardware**
 
 - [ ] **Reader tolerance:** does the frame straddle the die, and how close does the reader need to be (placeholder 2 cm)?
+- [ ] **Rangefinder minimum range:** what is the real rangefinder's minimum range, and its reading when landed on the die? Typical sensors read nothing below 0.1 to 0.2 m, above `touchdown_range_m` (0.05). Hardware reads it through `dist_bottom` (EKF), so `touchdown_range_m` must match what `dist_bottom` shows on the die.
 - [ ] **NFC tries per motor stage** and time per read.
 - [ ] **Gripper:** planned for competition, and how long a grab takes on the die.
 
 **For GNC**
 
-- [ ] **PX4 auto-disarm:** set `COM_DISARM_LAND` so motor stage 1 holds idle on the die.
+- [ ] **PX4 auto-disarm:** set `COM_DISARM_LAND` so motor stage 1 holds idle on the die. In SITL PX4 (default 2.0 s) it applies in offboard too (only AUTO_MISSION and an external config override are exempt), so today PX4 disarms ~2 s after touchdown and LIFTOFF re-arms.
 - [ ] **Field north:** which way, and who sets it on the day.

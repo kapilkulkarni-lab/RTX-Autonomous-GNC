@@ -10,8 +10,11 @@ camera_fov sim node and the tests share it. Field frame (ENU, meters); ground at
                    when it is within confirm_radius_m horizontally and the drone is no higher
                    than confirm_max_alt_m
   drop             no detections at all (no map updates, target_relative or color)
+  blind_height_m   below this height the down camera sees nothing (no target_relative, color)
+  noise_m          Gaussian noise (std, per axis) on target_relative, for realistic landings
 """
 import math
+import random
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -34,13 +37,17 @@ class PerceptionOutput:
 class PerceptionModel:
     def __init__(self, dice: Sequence[Die], confirm_radius_m: float = 0.3,
                  confirm_max_alt_m: float = 1.3, target_match_m: float = 1.0,
-                 wrong_color_first: str = ''):
+                 wrong_color_first: str = '', blind_height_m: float = 0.0,
+                 noise_m: float = 0.0, seed: Optional[int] = None):
         self.dice = list(dice)
         self.confirm_radius_m = confirm_radius_m
         self.confirm_max_alt_m = confirm_max_alt_m
         self.target_match_m = target_match_m
         self.wrong_color_first = (wrong_color_first or '').strip().lower()
         self.reported: Dict[int, str] = {}       # die index -> color in Perception's map
+        self.blind_height_m = blind_height_m
+        self.noise_m = noise_m
+        self.rng = random.Random(seed)
 
     @classmethod
     def from_manifest(cls, manifest, **kwargs) -> 'PerceptionModel':
@@ -58,7 +65,9 @@ class PerceptionModel:
         close_view = close_view or in_view
         if not drop:
             seen = [i for i, d in enumerate(self.dice) if in_view(d.x, d.y)]
-            visible = [i for i, d in enumerate(self.dice) if close_view(d.x, d.y)]
+            blind = drone[2] < self.blind_height_m
+            visible = [] if blind else [i for i, d in enumerate(self.dice)
+                                        if close_view(d.x, d.y)]
             for i in seen:
                 if i not in self.reported:
                     first = not self.reported
@@ -69,7 +78,10 @@ class PerceptionModel:
                 i = min(visible, key=lambda k: _dist(self.dice[k], target_xy))
                 if _dist(self.dice[i], target_xy) <= self.target_match_m:
                     d = self.dice[i]
-                    out.target_relative = (d.x - drone[0], d.y - drone[1], d.z - drone[2])
+                    nx = self.rng.gauss(0.0, self.noise_m) if self.noise_m > 0 else 0.0
+                    ny = self.rng.gauss(0.0, self.noise_m) if self.noise_m > 0 else 0.0
+                    out.target_relative = (d.x - drone[0] + nx, d.y - drone[1] + ny,
+                                           d.z - drone[2])
             if visible and drone[2] <= self.confirm_max_alt_m:
                 i = min(visible, key=lambda k: _dist(self.dice[k], drone))
                 if _dist(self.dice[i], drone) <= self.confirm_radius_m:

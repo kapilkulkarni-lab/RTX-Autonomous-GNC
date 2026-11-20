@@ -30,20 +30,19 @@ ALL = (
     RETRIEVING, LIFTOFF, RETURNING, LANDING, RETURN_CONFIRMED, ABORTED, PAUSED,
 )
 
-# "On the die" means NFC_READY, READING or RETRIEVING.
-ON_DIE = frozenset({NFC_READY, READING, RETRIEVING})
+# TEMPORARY (Milestone 6 only; replaced by NFC_READY / READING in Milestone 7): on the die after
+# touchdown for on_die_test_s, then LIFTOFF -> RETURNING. Published honestly; kept out of ALL.
+ON_DIE_TEST = 'ON_DIE_TEST'
+TEMPORARY = (ON_DIE_TEST,)
+
+# "On the die" means NFC_READY, READING or RETRIEVING (and ON_DIE_TEST while it exists).
+ON_DIE = frozenset({NFC_READY, READING, RETRIEVING, ON_DIE_TEST})
 
 # Terminal states: no pause, and every intent except abort is rejected after them.
 END_STATES = frozenset({RETURN_CONFIRMED, ABORTED})
 
-# TEMPORARY (Milestone 5 only; replaced by DESCENDING in Milestone 6): hover over the die for
-# target_hover_s, then return (LANDING in place). Published honestly; kept out of ALL.
-TARGET_HOVER = 'TARGET_HOVER'
-TEMPORARY = (TARGET_HOVER,)
-
 # Every name the state machine may publish right now.
 PUBLISHABLE = ALL + TEMPORARY
 
-# Flying (not on the ground or on the die). TARGET_HOVER is airborne while it exists.
-AIRBORNE = frozenset({TAKEOFF, SEARCHING, APPROACHING, DESCENDING, LIFTOFF, RETURNING, LANDING,
-                      TARGET_HOVER})
+# Flying (not on the ground or on the die).
+AIRBORNE = frozenset({TAKEOFF, SEARCHING, APPROACHING, DESCENDING, LIFTOFF, RETURNING, LANDING})

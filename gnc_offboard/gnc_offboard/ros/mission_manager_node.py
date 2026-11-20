@@ -24,13 +24,13 @@ from rclpy.node import Node
 from avc_interfaces.msg import (ColorCheck, DiceMap, MissionTarget, ObstacleArray,
                                 PerceptionHeartbeat, TargetRelative)
 from avc_msgs.msg import Intent, LlmHeartbeat, MissionState
-from px4_msgs.msg import (BatteryStatus, VehicleLandDetected, VehicleLocalPosition,
-                          VehicleOdometry, VehicleStatus)
+from px4_msgs.msg import (BatteryStatus, DistanceSensor, VehicleLandDetected,
+                          VehicleLocalPosition, VehicleOdometry, VehicleStatus)
 
 from gnc_offboard.field_map import default_manifest_path
 from gnc_offboard.guidance import px4_interface as px4
 from gnc_offboard.mission import qos
-from gnc_offboard.mission.cameras import default_cameras_path, load_cameras
+from gnc_offboard.mission.cameras import default_cameras_path, load_blind_height, load_cameras
 from gnc_offboard.mission.clock import MonotonicClock
 from gnc_offboard.mission.config import MissionConfig, load_yaml_params
 from gnc_offboard.mission.context import MissionContext
@@ -114,6 +114,10 @@ class MissionManagerNode(Node):
         self.get_logger().info(f'Field frame from {field_file}')
         cameras_file = self.cfg.cameras_file or default_cameras_path()
         self.ctx.cameras = load_cameras(cameras_file)
+        self.ctx.blind_height_m = load_blind_height(cameras_file)
+        self.get_logger().info(f'Rangefinder: {self.cfg.rangefinder_source}'
+                               + (f' on {self.cfg.rangefinder_topic}'
+                                  if self.cfg.rangefinder_source == 'distance_sensor' else ''))
         self.get_logger().info(f'Cameras {sorted(self.ctx.cameras)} from {cameras_file}')
         self._last_target = None
         self.io = RosMissionIO(self)
@@ -160,6 +164,9 @@ class MissionManagerNode(Node):
                 (BatteryStatus, '/fmu/out/battery_status', 'battery_status'),
                 (VehicleOdometry, '/fmu/out/vehicle_odometry', 'odometry')):
             self.create_subscription(msg_type, t[base], self._store(name), qos.PX4)
+        if self.cfg.rangefinder_source == 'distance_sensor':
+            self.create_subscription(DistanceSensor, self.cfg.rangefinder_topic,
+                                     self._store('distance_sensor'), qos.PX4)
         self.create_timer(1.0 / self.cfg.setpoint_hz, self.stream_setpoint)
 
     def stream_setpoint(self) -> None:

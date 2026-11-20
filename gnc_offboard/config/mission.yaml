@@ -64,5 +64,21 @@ mission_manager:
     die_match_radius_m: 0.3       # TBD: dice-map entries this close are the same die
     max_die_attempts: 2           # TBD: a die lost / never confirmed this many times is skipped
 
-    # TARGET_HOVER (TEMPORARY, Milestone 5 only; replaced by DESCENDING in Milestone 6)
-    target_hover_s: 5.0
+    # DESCENDING (the camera blind height is the down camera's blind_height_m in cameras.yaml)
+    descent_stages_m: [1.0, 0.5, 0.25]     # TBD: stage heights, highest first
+    stage_lateral_tol_m: [0.10, 0.05, 0.03]  # TBD: sideways tolerance to leave each stage
+    reader_lateral_tol_m: 0.02    # TBD: the last stage's tolerance before going blind
+    descent_rate_mps: 0.15        # TBD
+    stage_settle_s: 3.0           # TBD: time to get within a stage's tolerance before a retry
+    touchdown_range_m: 0.05       # TBD: rangefinder at or under this = touching down
+    touchdown_hold_s: 0.5         # TBD: ... for this long
+    descent_max_retries: 2        # TBD: then `failed` -> APPROACHING
+    # Rangefinder: distance_sensor (px4_msgs/DistanceSensor on rangefinder_topic; the SITL stand-in
+    # from camera_fov) or dist_bottom (vehicle_local_position.dist_bottom when dist_bottom_valid;
+    # hardware, no PX4 firmware change).
+    rangefinder_source: distance_sensor
+    rangefinder_topic: /fmu/out/distance_sensor
+
+    # On the die (TEMPORARY, Milestone 6 only; replaced by NFC_READY / READING in Milestone 7)
+    on_die_test_s: 5.0            # stay on the die this long, then LIFTOFF -> RETURNING
+    descent_test_count: 1         # landing-accuracy runs: touch down this many times first

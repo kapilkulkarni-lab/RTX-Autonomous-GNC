@@ -2,11 +2,12 @@
 import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Tuple, Union
 
 import yaml
 
 NODE_KEY = 'mission_manager'
+RANGEFINDER_SOURCES = ('distance_sensor', 'dist_bottom')
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,19 @@ class MissionConfig:
     approach_center_tol_m: float
     die_match_radius_m: float
     max_die_attempts: int
-    target_hover_s: float             # TEMPORARY (Milestone 5; DESCENDING in Milestone 6)
+    # DESCENDING
+    descent_stages_m: Tuple[float, ...]
+    stage_lateral_tol_m: Tuple[float, ...]
+    reader_lateral_tol_m: float
+    descent_rate_mps: float
+    stage_settle_s: float
+    touchdown_range_m: float
+    touchdown_hold_s: float
+    descent_max_retries: int
+    rangefinder_source: str
+    rangefinder_topic: str
+    on_die_test_s: float              # TEMPORARY (Milestone 6; NFC_READY in Milestone 7)
+    descent_test_count: int           # TEMPORARY (landing-accuracy runs)
 
     @classmethod
     def names(cls):
@@ -68,6 +81,11 @@ class MissionConfig:
                 typed[f.name] = v
             elif f.type is str:
                 typed[f.name] = str(v)
+            elif f.type == Tuple[float, ...]:
+                items = tuple(float(x) for x in v)
+                if not items or any(not x > 0 for x in items):
+                    raise ValueError(f'{f.name} must be a non-empty list of positive numbers')
+                typed[f.name] = items
             elif f.type is int:
                 if isinstance(v, bool) or int(v) != v or int(v) < 1:
                     raise ValueError(f'{f.name} must be a whole number >= 1, got {v!r}')
@@ -78,6 +96,14 @@ class MissionConfig:
         if typed['search_pattern'] not in PATTERNS:
             raise ValueError(f'search_pattern must be one of {PATTERNS}, '
                              f'got {typed["search_pattern"]!r}')
+        stages, tols = typed['descent_stages_m'], typed['stage_lateral_tol_m']
+        if len(stages) != len(tols):
+            raise ValueError('descent_stages_m and stage_lateral_tol_m must be the same length')
+        if list(stages) != sorted(stages, reverse=True):
+            raise ValueError('descent_stages_m must be ordered highest first')
+        if typed['rangefinder_source'] not in RANGEFINDER_SOURCES:
+            raise ValueError(f'rangefinder_source must be one of {RANGEFINDER_SOURCES}, '
+                             f'got {typed["rangefinder_source"]!r}')
         if typed['search_rows_along'] not in ROWS_ALONG:
             raise ValueError(f'search_rows_along must be one of {ROWS_ALONG}, '
                              f'got {typed["search_rows_along"]!r}')

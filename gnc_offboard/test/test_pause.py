@@ -7,7 +7,8 @@ from conftest import (heartbeat, AUTO_LAND, OFFBOARD, POSCTL, battery, intent, l
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.intents import RegionFields
 from gnc_offboard.mission.mission_manager_smach import (
-    ABORTED_OUT, MISSION_ABORTED, MISSION_COMPLETE, RESUME_NEW_INTENT, RETURN_OUT, AbortCause,
+    ABORTED_OUT, MISSION_ABORTED, MISSION_COMPLETE, RESUME_NEW_INTENT, RETURN_GROUND, RETURN_OUT,
+    AbortCause,
     Paused, TRANSITIONS, build_state_machine, resume_outcome)
 
 
@@ -97,23 +98,25 @@ def test_pause_resume_takeoff_hovers_where_it_is(ctx, rio, cfg, clock, fake_px4,
     assert names[3:6] == [S.PAUSED, S.TAKEOFF, S.SEARCHING]          # TAKEOFF starts over
 
 
-def test_pause_resume_target_hover_restarts_its_timer(ctx, rio, cfg, clock, fake_px4, script, ids):
+def test_pause_on_the_die_keeps_motor_stage_and_restarts(ctx, rio, cfg, clock, fake_px4, script,
+                                                          ids):
+    """Pause on the die: nothing changes (no setpoints, offboard or arming). Resume goes back
+    to ON_DIE_TEST, which starts its time over."""
     entered = {}
     clock.hooks.append(lambda now: entered.setdefault(len(transitions_of(rio)), (
         transitions_of(rio)[-1] if transitions_of(rio) else '', now)))
     outcome, px4, during, marks = fly_with_pause(
         ctx, rio, cfg, clock, fake_px4, script, ids,
-        pause_when=lambda c, p: c.state == S.TARGET_HOVER)
+        pause_when=lambda c, p: c.state == S.ON_DIE_TEST)
     assert outcome == MISSION_COMPLETE
     names = transitions_of(rio)
     i = names.index(S.PAUSED)
-    assert names[i - 1:i + 3] == [S.TARGET_HOVER, S.PAUSED, S.TARGET_HOVER, S.LANDING]
-    assert 'land' not in during
-    # The resumed hover lasted a full target_hover_s.
-    resumed = next(t for name, t in entered.values() if name == S.TARGET_HOVER and t > marks[
+    assert names[i - 1:i + 3] == [S.ON_DIE_TEST, S.PAUSED, S.ON_DIE_TEST, S.LIFTOFF]
+    assert not {'set_offboard', 'set_setpoint', 'arm', 'disarm', 'land'} & set(during)
+    resumed = next(t for name, t in entered.values() if name == S.ON_DIE_TEST and t > marks[
         'paused_at'])
-    landing = next(t for name, t in entered.values() if name == S.LANDING)
-    assert landing - resumed >= cfg.target_hover_s - 0.1
+    liftoff = next(t for name, t in entered.values() if name == S.LIFTOFF)
+    assert liftoff - resumed >= cfg.on_die_test_s - 0.1
 
 
 def test_pause_while_descending_hovers_then_resumes_landing(ctx, rio, cfg, clock, fake_px4,
@@ -138,7 +141,7 @@ def test_pause_after_landed_stays_on_the_ground(ctx, rio, cfg, clock, fake_px4, 
         resume_after_s=3.0, auto_disarm_s=1.0)
     assert outcome == MISSION_COMPLETE
     assert not {'set_offboard', 'set_setpoint', 'arm', 'disarm'} & set(during)
-    assert marks['z_end'] == 0.0 and px4.landed
+    assert marks['z_end'] == pytest.approx(0.0, abs=0.02) and px4.landed
     assert transitions_of(rio)[-3:] == [S.PAUSED, S.LANDING, S.RETURN_CONFIRMED]
 
 
@@ -182,7 +185,7 @@ def test_new_intent_while_paused_airborne_resumes_to_searching(ctx, rio, cfg, cl
 
 
 def test_update_only_while_paused_counts_as_new_intent(ctx, io, cfg, clock, feed):
-    ctx.offboard_engaged, ctx.paused_from, ctx.active_target = True, S.TARGET_HOVER, 'blue'
+    ctx.offboard_engaged, ctx.paused_from, ctx.active_target = True, S.SEARCHING, 'blue'
     feed.set(vehicle_status=status(True, OFFBOARD), local_position=position(z=-1.5),
              land_detected=land_detected(False), battery_status=battery(0.9),
              perception_heartbeat=heartbeat())
@@ -194,13 +197,13 @@ def test_update_only_while_paused_counts_as_new_intent(ctx, io, cfg, clock, feed
 
 
 def test_resume_extra_fields_ignored(ctx, io, cfg, clock, feed):
-    ctx.offboard_engaged, ctx.paused_from, ctx.active_target = True, S.TARGET_HOVER, 'blue'
+    ctx.offboard_engaged, ctx.paused_from, ctx.active_target = True, S.SEARCHING, 'blue'
     feed.set(vehicle_status=status(True, OFFBOARD), local_position=position(z=-1.5),
              land_detected=land_detected(False), battery_status=battery(0.9),
              perception_heartbeat=heartbeat())
     ctx.update_input('intent', msg('resume', 'black', 3, avoid_mask=15, target_quadrant=1),
                      clock.now())
-    assert Paused(ctx, io, cfg, clock).execute() == resume_outcome(S.TARGET_HOVER)
+    assert Paused(ctx, io, cfg, clock).execute() == resume_outcome(S.SEARCHING)
     assert ctx.active_target == 'blue' and ctx.regions is None
     assert (ctx.last_intent_id, ctx.last_intent_result) == (3, 'applied')
 
@@ -239,7 +242,7 @@ def test_resume_targets_are_wired():
 
 # ---- global checks while paused -----------------------------------------------------------------
 
-def paused_airborne(ctx, feed, clock, paused_from=S.TARGET_HOVER):
+def paused_airborne(ctx, feed, clock, paused_from=S.SEARCHING):
     ctx.offboard_engaged, ctx.paused_from, ctx.active_target = True, paused_from, 'blue'
     ctx.start_position = (0.0, 0.0, 0.0, 0.0)
     ctx.mission_start_time = clock.now()
@@ -252,11 +255,11 @@ def test_abort_while_paused_airborne_holds_then_lands(ctx, io, cfg, clock, fake_
                                                       ids):
     px4 = fake_px4()
     ctx.update_input('intent', msg('retrieve', 'blue', 1), clock.now())
-    script.when(lambda c: c.state == S.TARGET_HOVER, msg('pause', intent_id=2))
+    script.when(lambda c: c.state == S.SEARCHING, msg('pause', intent_id=2))
     script.when(lambda c: c.state == S.PAUSED, msg('abort', intent_id=3))
     assert build_state_machine(ctx, io, cfg, clock).execute() == MISSION_ABORTED
     assert transitions_of(io)[-2:] == [S.PAUSED, S.ABORTED]
-    assert ctx.abort_from == S.TARGET_HOVER
+    assert ctx.abort_from == S.SEARCHING
     assert px4.landed and not px4.armed             # held, then landed in place
 
 
@@ -267,7 +270,7 @@ def test_abort_while_paused_on_ground(ctx, io, cfg, clock, feed):
     assert ctx.abort_from == S.STANDBY
 
 
-@pytest.mark.parametrize('paused_from', [S.TAKEOFF, S.TARGET_HOVER])
+@pytest.mark.parametrize('paused_from', [S.TAKEOFF, S.SEARCHING])
 def test_return_to_start_while_paused_airborne(paused_from, ctx, io, cfg, clock, feed):
     paused_airborne(ctx, feed, clock, paused_from)
     ctx.update_input('intent', msg('return_to_start', intent_id=2), clock.now())
@@ -324,7 +327,7 @@ def test_return_to_start_while_paused_from_preflight(ctx, io, cfg, clock, feed):
     ctx.paused_from, ctx.mission_start_time = S.PREFLIGHT, clock.now()
     feed.set(vehicle_status=status(False), local_position=position())
     ctx.update_input('intent', msg('return_to_start', intent_id=2), clock.now())
-    assert Paused(ctx, io, cfg, clock).execute() == RETURN_OUT   # -> LANDING on the ground
+    assert Paused(ctx, io, cfg, clock).execute() == RETURN_GROUND   # -> LANDING on the ground
 
 
 def test_return_to_start_while_paused_from_standby_no_change(ctx, io, cfg, clock):

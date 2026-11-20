@@ -362,11 +362,16 @@ copy ones worth keeping somewhere safe, since `make distclean` deletes them.
 ## Flying mission_manager (SITL)
 
 `mission_manager` is the one node that flies the mission (spec: `docs/mission_manager_outline.md`).
-It flies STANDBY → PREFLIGHT → TAKEOFF → SEARCHING → APPROACHING → TARGET_HOVER → LANDING →
-RETURN_CONFIRMED, plus ABORTED and PAUSED. TARGET_HOVER (hover over the die `target_hover_s`, then
-land in place) is **temporary** until DESCENDING exists. Parameters live in
-`gnc_offboard/config/mission.yaml`; override any with `-p name:=value`. In sim the field frame
-comes from the world manifest; on hardware pass `-p field_file:=.../config/field.yaml`.
+It flies STANDBY → PREFLIGHT → TAKEOFF → SEARCHING → APPROACHING → DESCENDING → ON_DIE_TEST →
+LIFTOFF → RETURNING → LANDING → RETURN_CONFIRMED, plus ABORTED and PAUSED. ON_DIE_TEST (stay on
+the die `on_die_test_s`, then lift off and return) is **temporary** until the NFC states exist.
+Parameters live in `gnc_offboard/config/mission.yaml`; override any with `-p name:=value`. In sim
+the field frame comes from the world manifest; on hardware pass
+`-p field_file:=.../config/field.yaml -p rangefinder_source:=dist_bottom`.
+
+The SITL x500 has no rangefinder and PX4's DDS bridge does not publish `/fmu/out/distance_sensor`,
+so `camera_fov` publishes a stand-in there (height above the ground from odometry). PX4 auto-disarms
+about 2 s after touchdown (`COM_DISARM_LAND`, also in offboard); LIFTOFF re-arms.
 
 1. Start the sim (Gazebo + PX4 + XRCE agent + dev pane): `~/dev/avc-gnc/start_sim.sh -H`.
    Wait until PX4's pane says it is ready. If arming is denied for manual control, run
@@ -414,6 +419,18 @@ comes from the world manifest; on hardware pass `-p field_file:=.../config/field
    ```
    Compare search patterns with `-p search_pattern:=frontier` (or `zone_sweep`; default
    `lawnmower`), saving each run's coverage with camera_fov's `output` parameter.
+
+8. Descent and landing accuracy:
+   ```bash
+   # Force a descent retry: detections off mid-descent ("die lost: retry 1 of 2"), then back on
+   ros2 param set /camera_fov drop_detections true
+   ros2 param set /camera_fov drop_detections false
+   # Or a noisier camera (restart camera_fov): -p target_relative_noise_m:=0.06
+   # Landing accuracy: 20 touchdowns, then home. Start mission_manager with
+   ros2 run gnc_offboard mission_manager --ros-args -p descent_test_count:=20 -p on_die_test_s:=3.0
+   # and in another terminal (gnc), before sending the retrieve:
+   python3 ~/dev/avc-gnc/tools/landing_accuracy.py
+   ```
 
 `require_pilot_arm:=true` makes PREFLIGHT wait for the pilot to arm (GNC never sends arm); use it
 on hardware. After RETURN_CONFIRMED or ABORTED the node keeps publishing its final state; Ctrl+C

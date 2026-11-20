@@ -88,6 +88,8 @@ class MissionContext:
     field_config: Any = None                 # field.FieldConfig
     coverage: Any = None                     # camera_model.CoverageGrid: ground already searched
     cameras: Any = None                      # {'d455': CameraModel, 'down': CameraModel}
+    blind_height_m: Optional[float] = None   # the down camera's blind height (cameras.yaml)
+    touchdowns: int = 0                      # touchdowns on a die this mission
     coverage_pose: Optional[Any] = None      # (position, q) of the odometry last marked
     target_centroid: Optional[Any] = None    # field x, y, z of the target die once known
     given_up_dice: List[Any] = field(default_factory=list)  # field points excluded from the search

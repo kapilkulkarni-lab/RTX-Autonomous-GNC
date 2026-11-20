@@ -4,18 +4,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import (heartbeat, AUTO_LAND, OFFBOARD, POSCTL, battery, intent, land_detected, position,
+from conftest import (Hover, heartbeat, AUTO_LAND, OFFBOARD, POSCTL, battery, intent, land_detected, position,
                       status, transitions_of)
 from gnc_offboard.mission import intents as I
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.intents import RegionFields
 from gnc_offboard.mission.mission_manager_smach import (
-    ABORTED_OUT, MISSION_COMPLETE, PAUSE_OUT, RETURN_OUT, Aborted, TargetHover, Landing,
+    ABORTED_OUT, MISSION_COMPLETE, PAUSE_OUT, RETURN_OUT, Aborted, Landing,
     MissionOver, Paused, Preflight, ReturnConfirmed, Standby, Takeoff, build_state_machine,
     run_mission)
 
 START = (0.0, 0.0, 0.0, 0.0)
-NOT_END = [Standby, Preflight, Takeoff, TargetHover, Landing]
+NOT_END = [Standby, Preflight, Takeoff, Hover, Landing]
 
 
 def full(action, color='', intent_id=1, **fields):
@@ -128,7 +128,7 @@ def test_retrieve_first_starts_the_mission(ctx, io, cfg, clock):
     assert ctx.last_intent_result == 'applied'
 
 
-@pytest.mark.parametrize('cls', [Preflight, Takeoff, TargetHover, Landing])
+@pytest.mark.parametrize('cls', [Preflight, Takeoff, Hover, Landing])
 def test_retrieve_same_color_applies_regions_no_state_change(cls, ctx, io, cfg, clock, feed):
     prepare(cls, ctx, feed, clock)
     state = make(cls, ctx, io, cfg, clock)
@@ -151,8 +151,8 @@ def test_retrieve_new_color_outside_retarget_states_updates_target(cls, ctx, io,
 
 
 def test_retrieve_without_color_is_no_change(ctx, io, cfg, clock, feed):
-    prepare(TargetHover, ctx, feed, clock)
-    state = make(TargetHover, ctx, io, cfg, clock)
+    prepare(Hover, ctx, feed, clock)
+    state = make(Hover, ctx, io, cfg, clock)
     send(ctx, clock, full('retrieve', '', 3))
     assert state.tick(clock.now()) is None
     assert ctx.active_target == 'blue' and ctx.last_intent_result == 'applied'
@@ -170,17 +170,17 @@ def test_abort_from_every_state_acts_on_action_alone(cls, ctx, io, cfg, clock, f
 
 
 def test_abort_from_paused(ctx, io, cfg, clock, feed):
-    prepare(TargetHover, ctx, feed, clock)
-    ctx.paused_from = S.TARGET_HOVER
+    prepare(Hover, ctx, feed, clock)
+    ctx.paused_from = S.SEARCHING
     state = make(Paused, ctx, io, cfg, clock)
     send(ctx, clock, full('abort', intent_id=2))
     assert state.tick(clock.now()) == ABORTED_OUT
-    assert ctx.abort_from == S.TARGET_HOVER          # ABORTED treats it as airborne
+    assert ctx.abort_from == S.SEARCHING          # ABORTED treats it as airborne
 
 
 # ---- return_to_start ----------------------------------------------------------------------------
 
-@pytest.mark.parametrize('cls', [Takeoff, TargetHover])
+@pytest.mark.parametrize('cls', [Takeoff, Hover])
 def test_return_to_start_airborne(cls, ctx, io, cfg, clock, feed):
     prepare(cls, ctx, feed, clock)
     state = make(cls, ctx, io, cfg, clock)
@@ -232,13 +232,13 @@ def test_pause_from_every_state(cls, ctx, io, cfg, clock, feed):
 
 
 def test_pause_while_paused_applied_no_change(ctx, io, cfg, clock, feed):
-    prepare(TargetHover, ctx, feed, clock)
-    ctx.paused_from = S.TARGET_HOVER
+    prepare(Hover, ctx, feed, clock)
+    ctx.paused_from = S.SEARCHING
     state = make(Paused, ctx, io, cfg, clock)
     send(ctx, clock, full('pause', intent_id=4))
     assert state.tick(clock.now()) is None
     assert (ctx.last_intent_id, ctx.last_intent_result) == (4, 'applied')
-    assert ctx.paused_from == S.TARGET_HOVER
+    assert ctx.paused_from == S.SEARCHING
 
 
 # ---- update_only and empty fields ---------------------------------------------------------------
@@ -255,8 +255,8 @@ def test_update_only_stores_regions_no_state_change(cls, ctx, io, cfg, clock, fe
 
 
 def test_empty_action_is_update_only(ctx, io, cfg, clock, feed):
-    prepare(TargetHover, ctx, feed, clock)
-    state = make(TargetHover, ctx, io, cfg, clock)
+    prepare(Hover, ctx, feed, clock)
+    state = make(Hover, ctx, io, cfg, clock)
     send(ctx, clock, full('', 'red', 2, avoid_mask=4))
     assert state.tick(clock.now()) is None
     assert ctx.active_target == 'blue' and ctx.regions.avoid_mask == 4
@@ -264,8 +264,8 @@ def test_empty_action_is_update_only(ctx, io, cfg, clock, feed):
 
 
 def test_unknown_action_applied_as_update_only_with_warning(ctx, io, cfg, clock, feed):
-    prepare(TargetHover, ctx, feed, clock)
-    state = make(TargetHover, ctx, io, cfg, clock)
+    prepare(Hover, ctx, feed, clock)
+    state = make(Hover, ctx, io, cfg, clock)
     send(ctx, clock, full('dance', intent_id=2))
     assert state.tick(clock.now()) is None
     assert ctx.last_intent_result == 'applied'
@@ -288,8 +288,8 @@ def test_action_and_color_normalized():
 # ---- intent IDs ---------------------------------------------------------------------------------
 
 def test_ids_5_6_1_2_all_applied_and_echoed(ctx, rio, cfg, clock, feed):
-    prepare(TargetHover, ctx, feed, clock)
-    state = make(TargetHover, ctx, rio, cfg, clock)
+    prepare(Hover, ctx, feed, clock)
+    state = make(Hover, ctx, rio, cfg, clock)
     for i in (5, 6, 1, 2):
         send(ctx, clock, full('update_only', intent_id=i))
         state.tick(clock.now())

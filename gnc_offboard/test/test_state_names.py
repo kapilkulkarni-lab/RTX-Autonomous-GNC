@@ -29,16 +29,17 @@ def test_placeholders():
 
 
 def test_groups():
-    assert S.ON_DIE == {S.NFC_READY, S.READING, S.RETRIEVING}
+    assert S.ON_DIE == {S.NFC_READY, S.READING, S.RETRIEVING, S.ON_DIE_TEST}
     assert S.END_STATES == {S.RETURN_CONFIRMED, S.ABORTED}
 
 
-def test_temporary_target_hover_kept_out_of_all():
-    assert S.TARGET_HOVER == 'TARGET_HOVER'
-    assert S.TARGET_HOVER not in S.ALL
-    assert S.PUBLISHABLE == S.ALL + (S.TARGET_HOVER,)
+def test_temporary_on_die_test_kept_out_of_all():
+    assert S.ON_DIE_TEST == 'ON_DIE_TEST'
+    assert S.ON_DIE_TEST not in S.ALL
+    assert S.PUBLISHABLE == S.ALL + (S.ON_DIE_TEST,)
+    assert not hasattr(S, 'TARGET_HOVER')       # removed in Milestone 6
     assert not hasattr(S, 'HOVER_TEST')         # removed in Milestone 5
-    assert S.TARGET_HOVER in S.AIRBORNE
+    assert S.ON_DIE_TEST in S.ON_DIE and S.ON_DIE_TEST not in S.AIRBORNE
 
 
 def test_no_other_module_hard_codes_a_state_name():

@@ -36,7 +36,12 @@ def position(x=0.0, y=0.0, z=0.0, heading=0.0, valid=True):
     m = VehicleLocalPosition()
     m.x, m.y, m.z, m.heading = float(x), float(y), float(z), float(heading)
     m.xy_valid = m.z_valid = valid
+    m.dist_bottom, m.dist_bottom_valid = max(0.0, -float(z)), valid
     return m
+
+
+def rangefinder(distance, quality=100):
+    return SimpleNamespace(current_distance=float(distance), signal_quality=quality)
 
 
 def land_detected(landed):
@@ -90,11 +95,32 @@ def cameras():
 @pytest.fixture
 def ctx(field_config, cfg, cameras):
     from gnc_offboard.camera_model import CoverageGrid
+    from gnc_offboard.mission.cameras import load_blind_height
     c = MissionContext()
     c.field_config = field_config
     c.coverage = CoverageGrid(field_config.bounds, cfg.coverage_cell_m)
     c.cameras = cameras
+    c.blind_height_m = load_blind_height(CAMERAS_YAML)
     return c
+
+
+from gnc_offboard.mission.mission_manager_smach import (  # noqa: E402
+    FLYING_GLOBALS, RETURN_OUT, MissionStateBase)
+from gnc_offboard.mission import state_names as _S  # noqa: E402
+
+
+class Hover(MissionStateBase):
+    """Test probe: an airborne state (reports as SEARCHING: airborne, battery, clock and retarget
+    checks apply) that only hovers and returns after HOLD_S. For testing global checks and
+    intents on their own, without SEARCHING's planning."""
+    NAME = _S.SEARCHING
+    GLOBALS = FLYING_GLOBALS
+    HOLD_S = 5.0
+
+    def step(self, snap, now):
+        if now - self.entered_at >= self.HOLD_S:
+            return self.finish(RETURN_OUT, 'target confirmed: landing (temporary)')
+        return None
 
 
 def odometry(x=0.0, y=0.0, z=0.0, yaw=0.0):
@@ -160,6 +186,8 @@ class FakePx4:
         self.armed, self.nav, self.z, self.landed = False, POSCTL, 0.0, True
         self.x = self.y = 0.0
         self.yaw = 0.0
+        self.took_off = False              # PX4 auto-disarms on landing only after a takeoff
+        self.landed_since = None
         self.speed = 3.0                  # m/s horizontal limit (setpoints move slower)
         self.landed_at = None
         self.seen = 0
@@ -167,15 +195,15 @@ class FakePx4:
         self.publish(clock.now())
 
     def pilot_arm(self):
-        self.armed = True
+        self.armed, self.took_off = True, False       # PX4: "taken off since arming" resets
 
     def tick(self, now):
         dt = 0.05
         for name, args in self.io.calls[self.seen:]:
-            if name == 'arm' and self.accept_arm:
-                self.armed = True
+            if name == 'arm' and self.accept_arm and not self.armed:
+                self.armed, self.took_off = True, False
             elif name == 'disarm' and self.landed and self.accept_disarm:
-                self.armed = False
+                self.armed, self.nav = False, POSCTL
             elif name == 'set_offboard' and self.armed and self.io.setpoint is not None \
                     and self.accept_offboard:
                 self.nav = OFFBOARD
@@ -186,25 +214,30 @@ class FakePx4:
             tx, ty, target = self.io.setpoint[:3]
             self.yaw = self.io.setpoint[3]
             step = max(-self.climb * dt, min(self.climb * dt, target - self.z))
-            self.z += step
-            dx, dy = tx - self.x, ty - self.y
-            d = (dx * dx + dy * dy) ** 0.5
-            k = min(1.0, self.speed * dt / d) if d > 1e-9 else 0.0
-            self.x, self.y = self.x + k * dx, self.y + k * dy
-            self.landed = self.z >= -0.02 and target >= -0.02
+            self.z = min(0.0, self.z + step)               # the ground (or the die) stops it
+            if self.z < -0.02:                            # off the ground: free to move sideways
+                dx, dy = tx - self.x, ty - self.y
+                d = (dx * dx + dy * dy) ** 0.5
+                k = min(1.0, self.speed * dt / d) if d > 1e-9 else 0.0
+                self.x, self.y = self.x + k * dx, self.y + k * dy
         elif self.armed and self.nav == AUTO_LAND:
             self.z = min(0.0, self.z + 0.5 * dt)
-            if self.z >= 0.0 and not self.landed:
-                self.landed, self.landed_at = True, now
-        if self.landed and self.armed and self.nav == AUTO_LAND and self.landed_at is not None \
-                and now - self.landed_at >= self.auto_disarm_s:
-            self.armed, self.nav = False, POSCTL          # PX4 auto-disarm
+        if self.armed and self.z < -0.3:
+            self.took_off = True
+        self.landed = self.z >= -0.02                     # land detector
+        self.landed_since = (self.landed_since or now) if self.landed else None
+        self.landed_at = self.landed_since
+        # PX4 COM_DISARM_LAND: disarm after auto_disarm_s landed, in offboard too (once it flew).
+        if self.landed and self.armed and self.took_off and \
+                now - self.landed_since >= self.auto_disarm_s:
+            self.armed, self.nav = False, POSCTL
         self.publish(now)
 
     def publish(self, now):
         self.ctx.update_input('vehicle_status', status(self.armed, self.nav), now)
         self.ctx.update_input('local_position', position(self.x, self.y, self.z), now)
         self.ctx.update_input('odometry', odometry(self.x, self.y, self.z, self.yaw), now)
+        self.ctx.update_input('distance_sensor', rangefinder(-self.z), now)
         self.ctx.update_input('land_detected', land_detected(self.landed), now)
         self.ctx.update_input('battery_status', battery(0.9), now)
 
@@ -291,6 +324,8 @@ class FakePerception:
         from gnc_offboard import search_planners as sp
         from gnc_offboard.sim.perception_model import PerceptionModel, square_view
         self.ctx, self.px4, self.cfg, self.sp, self.square_view = ctx, px4, cfg, sp, square_view
+        model_kw.setdefault('blind_height_m', ctx.blind_height_m or 0.0)
+        model_kw.setdefault('seed', 7)
         if dice is not None:
             self.model = PerceptionModel(dice, **model_kw)
         else:

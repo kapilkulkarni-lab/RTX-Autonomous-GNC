@@ -23,7 +23,7 @@ def test_yaml_values_and_markers():
     assert (cfg.loop_hz, cfg.setpoint_hz, cfg.state_pub_hz) == (20.0, 20.0, 5.0)
     text = CONFIG_YAML.read_text()
     assert 'force_return_at_s: 360.0      # TBD' in text
-    assert 'TEMPORARY' in text and 'target_hover_s' in text
+    assert 'TEMPORARY' in text and 'on_die_test_s' in text
 
 
 def test_config_rejects_missing_unknown_and_bad_bool():
@@ -44,7 +44,7 @@ def test_config_rejects_missing_unknown_and_bad_bool():
 def node():
     rclpy = pytest.importorskip('rclpy')
     from gnc_offboard.ros.mission_manager_node import MissionManagerNode
-    rclpy.init(args=['--ros-args', '-p', 'target_hover_s:=7.5',
+    rclpy.init(args=['--ros-args', '-p', 'on_die_test_s:=7.5',
                      '-p', f'field_file:={TEST_MANIFEST}', '-p', f'cameras_file:={CAMERAS_YAML}'])
     try:
         n = MissionManagerNode(config_path=str(CONFIG_YAML))
@@ -58,7 +58,7 @@ def node():
 
 
 def test_node_loads_parameters_with_overrides(node, cfg):
-    assert node.cfg == dataclasses.replace(cfg, target_hover_s=7.5, field_file=str(TEST_MANIFEST),
+    assert node.cfg == dataclasses.replace(cfg, on_die_test_s=7.5, field_file=str(TEST_MANIFEST),
                                            cameras_file=str(CAMERAS_YAML))
 
 

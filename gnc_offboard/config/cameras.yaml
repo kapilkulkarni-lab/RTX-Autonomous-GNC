@@ -3,6 +3,8 @@
 # Perception stand-in) both read this file (parameter cameras_file; '' = the installed copy).
 # Angles in degrees, mount offsets in meters in body FRD (forward, right, down).
 # max_range_m is the horizontal range Perception can detect dice at, not the optical range.
+# blind_height_m: below this height the camera can no longer see the die (DESCENDING finishes
+# on the last good centering; camera_fov stops target_relative and the color check).
 cameras:
   d455:                    # Intel RealSense D455, forward-tilted (RGB stream)
     hfov_deg: 90.0         # Intel spec (RGB)
@@ -14,6 +16,7 @@ cameras:
     right_m: 0.0           # TBD
     down_m: 0.0            # TBD
     max_range_m: 6.0       # TBD: Perception's real detection range with this camera
+    blind_height_m: 0.0    # not used for the D455
   down:                    # downward camera (BrainChip color check, final centering)
     hfov_deg: 120.0        # TBD: lens spec may be diagonal
     vfov_deg: 120.0        # TBD: lens spec may be diagonal
@@ -24,3 +27,4 @@ cameras:
     right_m: 0.0           # TBD
     down_m: 0.0            # TBD
     max_range_m: 6.0       # TBD: Perception's real detection range with this camera
+    blind_height_m: 0.20   # TBD: below this height the down camera cannot see the die

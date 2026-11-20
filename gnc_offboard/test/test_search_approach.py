@@ -1,17 +1,17 @@
-"""SEARCHING, APPROACHING, TARGET_HOVER, retarget, the Perception heartbeat check, and full runs
+"""SEARCHING, APPROACHING, retarget, the Perception heartbeat check, and full runs
 against FakePx4 + FakePerception (the shared sim/perception_model.py)."""
 import math
 from types import SimpleNamespace
 
 import pytest
 
-from conftest import (OFFBOARD, battery, flight, heartbeat, intent, land_detected, position,
+from conftest import (Hover, OFFBOARD, battery, flight, heartbeat, intent, land_detected, position,
                       status, transitions_of)
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.mission_manager_smach import (
     ABORTED_OUT, MISSION_ABORTED, MISSION_COMPLETE, RETARGET_SEEN, RETARGET_UNSEEN,
-    TRANSITIONS, AbortCause, Approaching, Searching, Standby, Takeoff, TargetHover,
-    build_state_machine)
+    TRANSITIONS, AbortCause, Approaching, Descending, Liftoff, Returning, Searching, Standby,
+    Takeoff, build_state_machine)
 from gnc_offboard.sim.perception_model import Die
 
 RED, BLACK, YELLOW = (2.0, 2.0), (-4.5, -1.0), (3.0, -3.0)     # test world (data/field_manifest.json)
@@ -56,16 +56,17 @@ def run_to_end(ctx, io, cfg, clock):
 
 def test_happy_path_to_the_target(ctx, io, cfg, clock, fake_px4, fake_perception):
     px4, _ = flight(ctx, io, cfg, clock, fake_px4, fake_perception, 'red')
-    hovered = []
-    clock.hooks.append(lambda now: hovered.append(ctx.field_config.frame.to_field(
-        px4.x, px4.y, px4.z)) if ctx.state == S.TARGET_HOVER else None)
+    on_die = []
+    clock.hooks.append(lambda now: on_die.append(ctx.field_config.frame.to_field(
+        px4.x, px4.y, px4.z)) if ctx.state == S.ON_DIE_TEST else None)
     assert run_to_end(ctx, io, cfg, clock) == MISSION_COMPLETE
     assert transitions_of(io) == [S.STANDBY, S.PREFLIGHT, S.TAKEOFF, S.SEARCHING, S.APPROACHING,
-                                  S.TARGET_HOVER, S.LANDING, S.RETURN_CONFIRMED]
+                                  S.DESCENDING, S.ON_DIE_TEST, S.LIFTOFF, S.RETURNING, S.LANDING,
+                                  S.RETURN_CONFIRMED]
     assert near(ctx.target_centroid, RED, 0.05)
-    x, y, z = hovered[0]
-    assert near((x, y), RED, cfg.approach_center_tol_m + 0.01)          # centered over it
-    assert z == pytest.approx(cfg.hover_height_m, abs=cfg.altitude_tol_m)
+    x, y, z = on_die[0]
+    assert near((x, y), RED, cfg.reader_lateral_tol_m + 0.005)          # landed on it
+    assert z == pytest.approx(0.0, abs=0.02)
     assert ctx.start_field == pytest.approx((-6.096, -6.096, 0.0))       # field frame
     assert ctx.coverage.count > 0
     assert 'SEARCHING -> APPROACHING: red found' in lines(io)
@@ -99,7 +100,7 @@ def test_wrong_color_known_goes_straight_to_the_target(ctx, io, cfg, clock, fake
     ctx.update_input('intent', intent('retrieve', 'red', 1), clock.now())
     assert run_to_end(ctx, io, cfg, clock) == MISSION_COMPLETE
     names = transitions_of(io)
-    assert names[3:7] == [S.SEARCHING, S.APPROACHING, S.APPROACHING, S.TARGET_HOVER]
+    assert names[3:7] == [S.SEARCHING, S.APPROACHING, S.APPROACHING, S.DESCENDING]
     assert 'SEARCHING -> APPROACHING: red already in the dice map' in lines(io)
     assert 'APPROACHING -> APPROACHING: wrong color (black): going to target' in lines(io)
     assert near(ctx.target_centroid, (3.0, 3.0), 0.05)
@@ -276,7 +277,7 @@ def test_coverage_not_reprojected_while_hovering(ctx, io, cfg, clock, feed, monk
     monkeypatch.setattr(smach_mod, 'footprints', lambda *a: calls.append(1) or real(*a))
     airborne(ctx, feed, clock)
     feed.set(odometry=odometry(z=-2.5))
-    state = make(TargetHover, ctx, io, cfg, clock)
+    state = make(Hover, ctx, io, cfg, clock)
     for _ in range(10):
         state.tick(clock.now())
     feed.set(odometry=odometry(x=1.0, z=-2.5))             # moved 1 m
@@ -312,7 +313,8 @@ def test_approaching_routes_around_obstacles(ctx, io, cfg, clock, feed):
 
 # ---- retarget -----------------------------------------------------------------------------------
 
-@pytest.mark.parametrize('cls', [Takeoff, Searching, Approaching, TargetHover])
+@pytest.mark.parametrize('cls', [Takeoff, Searching, Approaching, Descending, Liftoff,
+                                 Returning])
 @pytest.mark.parametrize('color, outcome', [('black', RETARGET_SEEN), ('yellow', RETARGET_UNSEEN)])
 def test_retarget_from_every_flying_state(cls, color, outcome, ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock, dice=[('black', BLACK)])
@@ -326,16 +328,18 @@ def test_retarget_from_every_flying_state(cls, color, outcome, ctx, io, cfg, clo
 
 
 def test_retarget_wiring():
-    for name in (S.TAKEOFF, S.SEARCHING, S.APPROACHING, S.TARGET_HOVER):
+    for name in (S.TAKEOFF, S.SEARCHING, S.APPROACHING, S.DESCENDING, S.LIFTOFF, S.RETURNING):
         assert TRANSITIONS[name][RETARGET_SEEN] == S.APPROACHING
         assert TRANSITIONS[name][RETARGET_UNSEEN] == S.SEARCHING
+    assert TRANSITIONS[S.ON_DIE_TEST][RETARGET_SEEN] == S.LIFTOFF      # on the die: LIFTOFF first
+    assert TRANSITIONS[S.ON_DIE_TEST][RETARGET_UNSEEN] == S.LIFTOFF
     for name in (S.STANDBY, S.PREFLIGHT, S.LANDING, S.PAUSED):
         assert RETARGET_SEEN not in TRANSITIONS[name]
 
 
 # ---- Perception heartbeat check -----------------------------------------------------------------
 
-@pytest.mark.parametrize('cls', [Takeoff, Searching, TargetHover])
+@pytest.mark.parametrize('cls', [Takeoff, Searching, Hover])
 def test_perception_stale_aborts_airborne(cls, ctx, io, cfg, clock, feed):
     airborne(ctx, feed, clock)
     feed.set(local_position=position(z=-0.5))     # below search altitude: TAKEOFF keeps climbing

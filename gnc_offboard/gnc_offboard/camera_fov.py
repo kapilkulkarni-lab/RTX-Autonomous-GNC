@@ -16,8 +16,15 @@ Perception stand-in (only what the cameras have actually seen)
   /perception/color_check          a confirmed color, down camera only, when close  rate_hz
   /perception/obstacle_detections  the manifest's obstacles                      1 Hz
   /perception/heartbeat            PerceptionHeartbeat                           heartbeat_hz
+  Below the down camera's blind_height_m (cameras.yaml) there is no target_relative or color;
+  target_relative carries target_relative_noise_m of Gaussian noise (std, per axis).
   Switches: wrong_color_first:=<color> (startup), drop_detections, heartbeat (live:
   `ros2 param set /camera_fov drop_detections true`).
+
+Rangefinder stand-in (PX4's DDS bridge does not publish /fmu/out/distance_sensor, and the SITL
+x500 has no rangefinder)
+  rangefinder_topic (/fmu/out/distance_sensor)  px4_msgs/DistanceSensor, height above the ground
+                                               from odometry + rangefinder_noise_m, rangefinder_hz
 
 Camera geometry can be changed live per camera (`ros2 param set /camera_fov down.pitch_down_deg
 85.0`); that affects this node only. mission_manager reads cameras.yaml at startup.
@@ -39,14 +46,15 @@ from avc_interfaces.msg import (ColorCheck, DiceMap, DiceMapEntry, MissionTarget
 from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Point32, PolygonStamped
 from nav_msgs.msg import OccupancyGrid
-from px4_msgs.msg import VehicleOdometry
+from px4_msgs.msg import DistanceSensor, VehicleOdometry
 
 from gnc_offboard.camera_model import CameraModel, CoverageGrid, contains_point
 from gnc_offboard.coverage_colors import DARKEST_AT_S, sensing_color
 from gnc_offboard.field_map import FieldMap, default_manifest_path
 from gnc_offboard.frames import FieldFrame
 from gnc_offboard.mission import qos
-from gnc_offboard.mission.cameras import CAMERA_NAMES, DOWN, default_cameras_path, load_cameras
+from gnc_offboard.mission.cameras import (CAMERA_NAMES, DOWN, default_cameras_path,
+                                          load_blind_height, load_cameras)
 from gnc_offboard.mission.qos import PX4 as PX4_QOS
 from gnc_offboard.sim.perception_model import PerceptionModel
 
@@ -85,6 +93,13 @@ class CameraFov(Node):
         p('rate_hz', 10.0)
         p('map_rate_hz', 2.0)
         p('heartbeat_hz', 5.0)
+        p('target_relative_noise_m', 0.02)
+        p('noise_seed', -1)               # -1: random each run
+        # Rangefinder stand-in
+        p('rangefinder', True)
+        p('rangefinder_topic', '/fmu/out/distance_sensor')
+        p('rangefinder_noise_m', 0.005)
+        p('rangefinder_hz', 20.0)
         # Camera geometry, per camera, seeded from the one camera config.
         self.cameras_file = self.get_parameter('cameras_file').value or default_cameras_path()
         for name, model in load_cameras(self.cameras_file).items():
@@ -101,10 +116,14 @@ class CameraFov(Node):
         if not math.isfinite(self.ground):
             raise ValueError('ground_z_m must be finite')
         g = lambda name: self.get_parameter(name).value  # noqa: E731
+        self.blind_height_m = load_blind_height(self.cameras_file)
+        seed = g('noise_seed')
         self.perception = PerceptionModel.from_manifest(
             manifest, confirm_radius_m=g('confirm_radius_m'),
             confirm_max_alt_m=g('confirm_max_alt_m'), target_match_m=g('target_match_m'),
-            wrong_color_first=g('wrong_color_first'))
+            wrong_color_first=g('wrong_color_first'), blind_height_m=self.blind_height_m,
+            noise_m=g('target_relative_noise_m'), seed=None if seed < 0 else seed)
+        self.range_rng = np.random.default_rng(None if seed < 0 else seed + 1)
         self.add_on_set_parameters_callback(self.parameters_changed)
 
         self.footprint_pub = self.create_publisher(PolygonStamped, '/camera/footprint', 1)
@@ -156,6 +175,9 @@ class CameraFov(Node):
         self.create_timer(1.0 / g('map_rate_hz'), self.publish_map)
         self.create_timer(1.0 / g('heartbeat_hz'), self.publish_heartbeat)
         self.create_timer(1.0, self.publish_obstacles)
+        if g('rangefinder'):
+            self.range_pub = self.create_publisher(DistanceSensor, g('rangefinder_topic'), PX4_QOS)
+            self.create_timer(1.0 / g('rangefinder_hz'), self.publish_range)
         self.get_logger().info(
             f'Cameras {", ".join(CAMERA_NAMES)} from {self.cameras_file}. Coverage active: '
             'cyan=down camera, magenta=D455, darker orange=more sensing time.')
@@ -287,6 +309,24 @@ class CameraFov(Node):
             o.x, o.y, o.radius = ob.x, ob.y, ob.radius
             msg.obstacles.append(o)
         self.obstacle_pub.publish(msg)
+
+    def publish_range(self):
+        """Rangefinder stand-in: height above the ground (field z of the drone) + noise."""
+        if self.drone is None or not self.fresh():
+            return
+        m = DistanceSensor()
+        m.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        m.min_distance, m.max_distance = 0.0, 100.0
+        noise = float(self.get_parameter('rangefinder_noise_m').value)
+        distance = max(0.0, self.drone[2] - self.ground)
+        if noise > 0:
+            distance = max(0.0, distance + float(self.range_rng.normal(0.0, noise)))
+        m.current_distance = float(distance)
+        m.variance = noise * noise
+        m.signal_quality = 100
+        m.type = DistanceSensor.MAV_DISTANCE_SENSOR_LASER
+        m.orientation = DistanceSensor.ROTATION_DOWNWARD_FACING
+        self.range_pub.publish(m)
 
     def publish_heartbeat(self):
         if not self.get_parameter('heartbeat').value:
