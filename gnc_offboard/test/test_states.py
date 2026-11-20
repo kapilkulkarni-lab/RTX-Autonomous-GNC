@@ -35,13 +35,16 @@ def test_standby_starts_on_retrieve_with_color(ctx, io, cfg, clock):
     assert ctx.pending_reason == 'retrieve blue: starting'
 
 
-def test_standby_ignores_other_intents_until_retrieve(ctx, io, cfg, clock, feed):
+def test_standby_waits_for_retrieve_with_a_color(ctx, io, cfg, clock, feed):
+    """update_only and a retrieve without a color are applied but do not start the mission."""
     ctx.update_input('intent', intent('update_only', intent_id=1), clock.now())
     ctx.update_input('intent', intent('retrieve', '', intent_id=2), clock.now())
     feed.at(1.0, lambda: ctx.update_input('intent', intent('retrieve', 'red', 3), clock.now()))
+    t0 = clock.now()
     assert run(Standby, ctx, io, cfg, clock) == 'start'
-    assert ctx.last_intent_id == 3                # 1 and 2 were never acknowledged
-    assert len([l for l in io.logs if 'not handled' in l[1]]) == 2
+    assert clock.now() - t0 >= 1.0 - 1e-6         # only the retrieve with a color started it
+    assert ctx.last_intent_id == 3
+    assert io.names().count('request_state_publish') == 3     # each intent published at once
     assert 'arm' not in io.names()
 
 
@@ -270,7 +273,8 @@ def test_aborted_stops_if_pilot_takes_over_during_hold(ctx, io, cfg, clock, feed
 # ---- whole machine ------------------------------------------------------------------------------
 
 def transitions(io):
-    return [text.split(' -> ')[1].split(':')[0] for level, text in io.logs if ' -> ' in text]
+    return [text.split(' -> ')[1].split(':')[0] for level, text in io.logs
+            if level == 'info' and ' -> ' in text]
 
 
 def test_full_flight_standby_to_return_confirmed(ctx, io, cfg, clock, fake_px4):

@@ -30,7 +30,7 @@ from gnc_offboard.mission.clock import MonotonicClock
 from gnc_offboard.mission.config import MissionConfig, load_yaml_params
 from gnc_offboard.mission.context import MissionContext
 from gnc_offboard.mission.io import MissionIO
-from gnc_offboard.mission.mission_manager_smach import build_state_machine
+from gnc_offboard.mission.mission_manager_smach import build_state_machine, run_mission
 from gnc_offboard.mission.state_msg import MissionStateBuilder
 
 NODE_NAME = 'mission_manager'
@@ -106,6 +106,7 @@ class MissionManagerNode(Node):
         self.px4: Optional[px4.Px4Interface] = None
         self.sm = None
         self.worker: Optional[threading.Thread] = None
+        self._stop = threading.Event()
         self.sm_outcome = None
 
         self.state_pub = self.create_publisher(MissionState, '/mission/state', qos.MISSION_STATE)
@@ -165,13 +166,16 @@ class MissionManagerNode(Node):
 
     def _run_sm(self) -> None:
         try:
-            self.sm_outcome = self.sm.execute()
-            self.get_logger().info(f'State machine finished: {self.sm_outcome}')
+            # After the machine ends, run_mission keeps answering intents until shutdown.
+            self.sm_outcome = run_mission(self.sm, self.ctx, self.io, self.cfg, self.clock,
+                                          should_stop=self._stop.is_set)
+            self.get_logger().info(f'Mission worker stopped: {self.sm_outcome}')
         except Exception as exc:     # never die silently: stop streaming, report, keep node up
             self.io.clear_setpoint()
             self.get_logger().error(f'State machine crashed: {exc!r}')
 
     def stop_mission(self, timeout_s: float = 2.0) -> None:
+        self._stop.set()
         if self.sm is not None and self.worker is not None and self.worker.is_alive():
             self.sm.request_preempt()
             self.worker.join(timeout_s)

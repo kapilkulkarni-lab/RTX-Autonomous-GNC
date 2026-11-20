@@ -52,12 +52,12 @@ Global transitions live in `MissionStateBase`, checked first on every loop, so n
 
 | Check (in priority order) | Outcome | Applies in |
 | --- | --- | --- |
-| PX4 failsafe, offboard lost, or pilot takeover | `aborted` (stop sending commands) | Any state |
+| PX4 failsafe, offboard lost, pilot takeover, or PX4 link lost (no `vehicle_status` for `px4_status_stale_s`) | `aborted` (stop sending commands). In LANDING, a disarm with PX4's landed flag (or within `landed_disarm_grace_s` before it) is the normal end of a landing, never an abort | Any state (a failsafe counts once armed or offboard; link lost once airborne) |
 | Intent `abort` (acts on the action alone; other fields may be empty) | `aborted`. On the die: disarm and stay | Any state, including PAUSED |
 | Position estimate invalid for TBD s, or Perception heartbeat stale for TBD s | `aborted` (hold, then land in place) | Airborne states |
 | Battery below TBD % | `return` (on the die: LIFTOFF first) | Airborne and on-die states |
 | Mission clock past the force-return threshold | `return` (on the die: LIFTOFF first) | All states before RETURNING |
-| Intent `return_to_start` | `return` (on the die: LIFTOFF first) | Airborne and on-die states, including PAUSED |
+| Intent `return_to_start` | `return` (on the die: LIFTOFF first) | Airborne and on-die states, and PREFLIGHT (stop, disarm, RETURN\_CONFIRMED: already in the start zone); in PAUSED, as for `paused_from`. STANDBY: applied, no change |
 | Intent `pause` (acts on the action alone) | `pause` | Every state except RETURN\_CONFIRMED and ABORTED |
 | Intent `retrieve` with a new color | `retarget_seen` or `retarget_unseen`; drop the die first if holding one; on the die, LIFTOFF first. In PAUSED: stored, stays paused | TAKEOFF through RETURNING |
 
@@ -70,7 +70,7 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 | # | State | On entry | Each loop | Outcomes |
 | --- | --- | --- | --- | --- |
 | 1 | STANDBY | Disarmed, no setpoints | Wait for the first `retrieve` intent with a target color | `start` |
-| 2 | PREFLIGHT | Start the setpoint stream (hold current pose) | Wait for EKF converged and stable for TBD s; record start position in the field frame; arm; switch to offboard | `ready`, `failed` |
+| 2 | PREFLIGHT | Start the setpoint stream (hold current pose) | Wait for EKF converged and stable for `ekf_stable_s` and the stream running for `offboard_warmup_s`; record start position in the field frame; arm; switch to offboard (commands resent every `cmd_retry_s`). With `require_pilot_arm: true` GNC never sends arm: it waits for the pilot to arm (no timeout), then switches to offboard | `ready`, `failed` |
 | 3 | TAKEOFF | Setpoint = start position at search altitude | Check altitude within tolerance | `at_altitude` |
 | 4 | SEARCHING | **Target check first:** if Perception's dice map already holds the active color at a position that fits the current intent (inside any target quadrant, outside avoid regions), leave at once. Otherwise fly the search pattern, skipping ground already covered, and any target quadrant first | Follow pattern; mark covered cells; leave when the dice map reports the active color | `target_known`, `target_found` |
 | 5 | APPROACHING | Plan an obstacle- and region-aware path to the die's centroid from the dice map | Fly to hover height (TBD) over the centroid; run the color check from the downward camera | `over_target` (centered, color right), `wrong_color_known` → APPROACHING to the target, `wrong_color_unknown` / `lost` → SEARCHING (color PENDING keeps waiting) |
@@ -83,7 +83,7 @@ Fifteen states: the twelve from v2 plus DESCENDING, LIFTOFF and PAUSED. The dron
 | 12 | LANDING | Command land inside the start zone | Wait for landed and disarmed | `landed` |
 | 13 | RETURN\_CONFIRMED | Stop commands | Terminal | `mission_complete` |
 | 14 | ABORTED | Depends on cause: stop commanding if PX4 or the pilot has control; on the die, disarm and stay; otherwise hold, then land in place | Terminal | `mission_aborted` |
-| 15 | PAUSED | Save `paused_from`; set `previous_state` to it. Ground states: stop arming, disarm if armed in PREFLIGHT. Airborne: hover in place (DESCENDING and LANDING stop descending and hover). On the die: keep the current motor stage; cancel a running read | Hold; store any new intent; mission clock keeps running; abort, return, battery and pose-loss checks still apply | `resume_new_intent`, or one `resume_<state>` per pausable state |
+| 15 | PAUSED | Save `paused_from`; set `previous_state` to it. Ground states: stop arming, disarm if armed in PREFLIGHT. Airborne: hover in place (DESCENDING and LANDING stop descending and hover; LANDING after PX4 reports landed stays landed: no offboard request, no setpoints, no arming change). On the die: keep the current motor stage; cancel a running read | Hold; store any new intent; mission clock keeps running; abort, return, battery and pose-loss checks still apply | `resume_new_intent`, or one `resume_<state>` per pausable state |
 
 Notes:
 
@@ -92,7 +92,20 @@ Notes:
 - **PX4 auto-disarm.** PX4 disarms on its own a few seconds after landing (`COM_DISARM_LAND`), which would end motor stage 1 early. GNC must own disarming on the die; flag the parameter for the GNC lead to set.
 - `success_retrieve` requires retrieval enabled, enough time left (TBD) and the color check still right; otherwise `success_return` (LIFTOFF, then RETURNING).
 - Time thresholds: past the first, RETRIEVING is skipped; past the second, the global check forces a return.
-- **Resume rule.** If a new intent (any action other than `pause` or `resume`) arrived while paused, apply it and resume to SEARCHING, through LIFTOFF first if on the die. Otherwise resume to `paused_from`. Extra color or region fields on a `resume` are ignored. SMACH transitions are fixed at build time, so PAUSED returns a separate outcome for each state it can go back to.
+- **Resume rule.** If a new intent (any action other than `pause` or `resume`) arrived while paused, apply it and resume to SEARCHING, through LIFTOFF first if on the die. Otherwise resume to `paused_from`. Paused from a ground state (STANDBY, PREFLIGHT), a new intent instead resumes to `paused_from` with the stored intents applied (a stored first `retrieve` in STANDBY starts PREFLIGHT). The resumed state starts over (timers, setpoints and commands are reissued). Extra color or region fields on a `resume` are ignored. SMACH transitions are fixed at build time, so PAUSED returns a separate outcome for each state it can go back to.
+
+### Temporary stand-ins
+
+Each is marked TEMPORARY in the code and removed by the milestone named.
+
+| Stand-in | Behavior now | Replaced in |
+| --- | --- | --- |
+| HOVER\_TEST state | After TAKEOFF: hover `hover_test_s`, then LANDING in place. Published as "HOVER\_TEST" on `/mission/state` | Milestone 5 (SEARCHING) |
+| `return` outcome | LANDING in place (the drone has not left the start position yet) | Milestone 8 (RETURNING) |
+| `resume_new_intent` | HOVER\_TEST instead of SEARCHING | Milestone 5 |
+| `retrieve` with a new color | Updates `active_target` only, no retarget | Milestone 5 |
+| `update_only` and region fields | Stored, no behavior | Milestone 9 |
+| `read_chip` | Always rejected ("not on the die"): no on-die states yet | Milestone 7 |
 
 ## Transitions
 
@@ -102,7 +115,7 @@ Wire these as the SMACH `transitions={...}` map for each state. Global outcomes 
 | --- | --- | --- | --- |
 | STANDBY | `start` | Comms `retrieve` with a target color | PREFLIGHT |
 | PREFLIGHT | `ready` | EKF stable TBD s, start recorded, armed in offboard | TAKEOFF |
-| PREFLIGHT | `failed` | Arming or offboard refused after TBD s | ABORTED |
+| PREFLIGHT | `failed` | Arming or offboard refused for `arm_timeout_s` (with `require_pilot_arm`: offboard refused for `arm_timeout_s` after the pilot arms) | ABORTED |
 | TAKEOFF | `at_altitude` | Altitude within tolerance | SEARCHING |
 | SEARCHING | `target_known` | Entry check: active color already in the dice map, inside any target quadrant, outside avoid regions | APPROACHING |
 | SEARCHING | `target_found` | Dice map reports the active color | APPROACHING |
@@ -152,12 +165,12 @@ Every intent GNC handles sets `last_intent_id` and `last_intent_result` (`applie
 | `retrieve`, first | Set target color; STANDBY → PREFLIGHT |
 | `retrieve`, same color | No state change; apply region fields |
 | `retrieve`, new color | Retarget (global check). While PAUSED: stored, counts as a new intent |
-| `abort` | Any → ABORTED, including from PAUSED. Acts on the action alone |
-| `return_to_start` | Airborne or on the die → RETURNING, including from PAUSED |
+| `abort` | Any → ABORTED, including from PAUSED. Acts on the action alone. After RETURN\_CONFIRMED or ABORTED: applied, no change |
+| `return_to_start` | Airborne or on the die → RETURNING, including from PAUSED (as for `paused_from`). PREFLIGHT: stop, disarm, RETURN\_CONFIRMED. STANDBY: applied, no change |
 | `read_chip` | Go to NFC\_READY only if landed on the target die. **Rejected** otherwise: "read\_chip rejected: not on the die" |
-| `pause` | Any state except the end states → PAUSED. Acts on the action alone |
+| `pause` | Any state except the end states → PAUSED. Acts on the action alone. While already PAUSED: applied, no change |
 | `resume` | Leave PAUSED by the resume rule. **Rejected** if not paused: "resume ignored: not paused" |
-| `update_only` | No state change; apply regions and target quadrant. While PAUSED: also counts as a new intent |
+| `update_only` | No state change; apply regions and target quadrant. A `target_color` on it is a location hint for that quadrant, never a retarget. While PAUSED: also counts as a new intent |
 | Any intent except `abort` | **Rejected** after RETURN\_CONFIRMED or ABORTED: "mission over: intent ignored" |
 
 Those three are the only rejections. `reason` is plain English, under 80 characters, with no `|` character.
@@ -298,6 +311,10 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | --- | --- | --- |
 | `loop_hz` / `setpoint_hz` / `state_pub_hz` | Node, states | 20 / 20 / 5 |
 | `ekf_stable_s`, `arm_timeout_s` | PREFLIGHT, LIFTOFF | 2.0, 10.0 |
+| `offboard_warmup_s`, `cmd_retry_s` | PREFLIGHT, LANDING, PAUSED, ABORTED | 1.0, 1.0 |
+| `require_pilot_arm` | PREFLIGHT | false (SITL); true on hardware |
+| `hover_test_s` | HOVER\_TEST (temporary) | 5.0 |
+| `landed_disarm_grace_s` | LANDING | 0.5 |
 | `search_altitude_m`, `altitude_tol_m` | TAKEOFF, SEARCHING | 1.5, 0.15 |
 | `target_lost_s` | APPROACHING, DESCENDING | 2.0 |
 | `hover_height_m` | APPROACHING, DESCENDING, LIFTOFF | 1.0 |
@@ -311,9 +328,11 @@ Every value below is a ROS parameter loaded from `config/mission.yaml`. Use clea
 | `nfc_start_timeout_s` | NFC\_READY | 2.0 |
 | `nfc_tries_idle`, `nfc_tries_motors_off` | READING | 2, 2 |
 | `retrieval_enabled`, `gripper_timeout_s` | RETRIEVING | false, 10.0 |
-| `mission_time_limit_s`, `skip_retrieve_at_s`, `force_return_at_s` | Global, READING | 420, TBD, TBD |
+| `mission_time_limit_s`, `skip_retrieve_at_s`, `force_return_at_s` | Global, READING | 420, TBD, 360 (TBD) |
 | `battery_return_pct` | Global | 30 |
 | `pose_invalid_s`, `perception_stale_s`, `llm_stale_s` | Global | 1.0, 1.0, 2.0 |
+| `px4_status_stale_s` | Global (PX4 link lost) | 1.0 |
+| `px4_discovery_timeout_s` | Node startup | 20.0 |
 | `land_after_hold_s` | ABORTED | 3.0 |
 | `start_zone_size_m` | RETURNING, LANDING | 1.524 (5 ft) |
 | `field_north_axis` | Regions | +y |

@@ -77,7 +77,7 @@ class MissionContext:
 
     # Mission.
     active_target: str = ''                  # blue | red | yellow | black, '' if none
-    regions: Any = None                      # active regions and until rules: Milestone 9
+    regions: Any = None                      # intents.RegionFields as received; behavior: Milestone 9
     mission_start_time: Optional[float] = None
     start_position: Optional[Any] = None     # recorded in PREFLIGHT, field frame
 
@@ -91,7 +91,7 @@ class MissionContext:
     offboard_engaged: bool = False           # PX4 reached armed + offboard at least once
     pose_bad_since: Optional[float] = None   # position invalid or stale since (global check)
     paused_from: str = ''
-    stored_intent: Optional[Stamped] = None  # newest intent received while PAUSED
+    stored_intents: List[Stamped] = field(default_factory=list)  # new intents received while PAUSED
     after_liftoff: str = ''                  # where LIFTOFF goes next
 
     # Retries and on-die progress.

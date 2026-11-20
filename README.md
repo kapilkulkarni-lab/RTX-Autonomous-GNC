@@ -389,6 +389,15 @@ exists. Parameters live in `gnc_offboard/config/mission.yaml`; override any with
    ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent "{intent_id: 2, action: abort}"
    ```
 
+6. Pause and resume (any time before the end; a new `intent_id` each time):
+   ```bash
+   ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent "{intent_id: 3, action: pause}"
+   ros2 topic pub --once -w 1 /mission/intent avc_msgs/msg/Intent "{intent_id: 4, action: resume}"
+   ```
+   While PAUSED the drone hovers where it is (on the ground: stays put; PREFLIGHT disarms) and
+   `previous_state` shows the state it paused from. Resume goes back to that state, unless a
+   `retrieve` or `update_only` arrived while paused (then HOVER_TEST for now; SEARCHING later).
+
 `require_pilot_arm:=true` makes PREFLIGHT wait for the pilot to arm (GNC never sends arm); use it
 on hardware. After RETURN_CONFIRMED or ABORTED the node keeps publishing its final state; Ctrl+C
 to exit.

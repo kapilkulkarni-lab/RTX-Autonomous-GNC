@@ -6,7 +6,7 @@ from conftest import (AUTO_LAND, OFFBOARD, POSCTL, battery, intent, land_detecte
                       status)
 from gnc_offboard.mission import state_names as S
 from gnc_offboard.mission.mission_manager_smach import (
-    ABORTED_OUT, RETURN_OUT, STATE_CLASSES, TRANSITIONS, AbortCause, HoverTest, Landing,
+    ABORTED_OUT, PAUSE_OUT, RETURN_OUT, STATE_CLASSES, TRANSITIONS, AbortCause, HoverTest, Landing,
     Preflight, Standby, Takeoff)
 
 START = (0.0, 0.0, 0.0, 0.0)
@@ -263,5 +263,5 @@ def test_global_outcomes_registered_and_wired(ctx, io, cfg, clock):
         state = cls(ctx, io, cfg, clock)
         assert set(cls.GLOBALS) <= set(state.get_registered_outcomes())
         assert set(cls.OUTCOMES) | set(cls.GLOBALS) == set(TRANSITIONS[cls.NAME])
-    assert Standby.GLOBALS == (ABORTED_OUT,)
-    assert Landing.GLOBALS == (ABORTED_OUT,)
+    assert Standby.GLOBALS == (ABORTED_OUT, PAUSE_OUT)          # no return on the ground
+    assert Landing.GLOBALS == (ABORTED_OUT, PAUSE_OUT)          # already landing in place

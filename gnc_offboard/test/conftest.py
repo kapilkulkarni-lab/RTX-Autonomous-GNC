@@ -125,6 +125,7 @@ class FakePx4:
     def __init__(self, ctx, io, clock, accept_arm=True, auto_disarm_s=2.0, climb_mps=1.0):
         self.ctx, self.io, self.clock = ctx, io, clock
         self.accept_arm, self.auto_disarm_s, self.climb = accept_arm, auto_disarm_s, climb_mps
+        self.accept_offboard = True
         self.armed, self.nav, self.z, self.landed = False, POSCTL, 0.0, True
         self.landed_at = None
         self.seen = 0
@@ -141,7 +142,8 @@ class FakePx4:
                 self.armed = True
             elif name == 'disarm' and self.landed:
                 self.armed = False
-            elif name == 'set_offboard' and self.armed and self.io.setpoint is not None:
+            elif name == 'set_offboard' and self.armed and self.io.setpoint is not None \
+                    and self.accept_offboard:
                 self.nav = OFFBOARD
             elif name == 'land' and self.armed:
                 self.nav = AUTO_LAND
@@ -169,4 +171,64 @@ class FakePx4:
 
 @pytest.fixture
 def fake_px4(ctx, io, clock):
-    return lambda **kw: FakePx4(ctx, io, clock, **kw)
+    """fake_px4(io=..., **options): follows the given IO (default: the `io` fixture)."""
+    return lambda io_=None, **kw: FakePx4(ctx, io if io_ is None else io_, clock, **kw)
+
+
+class RecordingIO(FakeIO):
+    """FakeIO that also builds the /mission/state message the node would publish on every
+    request_state_publish (same builder as the node)."""
+
+    def __init__(self, ctx, clock):
+        super().__init__()
+        from gnc_offboard.mission.state_msg import MissionStateBuilder
+        self._ctx, self._clock, self._builder = ctx, clock, MissionStateBuilder()
+        self.published = []
+
+    def request_state_publish(self):
+        super().request_state_publish()
+        c = self._ctx
+        if c.state:
+            self.published.append(self._builder.build(
+                state=c.state, previous_state=c.previous_state, paused_from=c.paused_from,
+                reason=c.reason, active_target=c.active_target,
+                mission_time_s=c.mission_time_s(self._clock.now()),
+                last_intent_id=c.last_intent_id, last_intent_result=c.last_intent_result))
+
+
+@pytest.fixture
+def rio(ctx, clock):
+    return RecordingIO(ctx, clock)
+
+
+class Script:
+    """Send intents when conditions hold: script.when(cond, intent_msg). Each fires once, in
+    order (the next one is only armed after the previous one fired)."""
+
+    def __init__(self, ctx, clock):
+        self.ctx, self.clock, self.steps, self.fired = ctx, clock, [], []
+        clock.hooks.append(self.tick)
+
+    def when(self, cond, msg, then=None):
+        self.steps.append((cond, msg, then))
+        return self
+
+    def tick(self, now):
+        if self.steps and self.steps[0][0](self.ctx):
+            cond, msg, then = self.steps.pop(0)
+            self.fired.append((now, self.ctx.state, msg))
+            if msg is not None:
+                self.ctx.update_input('intent', msg, now)
+            if then:
+                then()
+
+
+@pytest.fixture
+def script(ctx, clock):
+    return Script(ctx, clock)
+
+
+def transitions_of(io):
+    """State names entered, from the transition log lines."""
+    return [text.split(' -> ')[1].split(':')[0] for level, text in io.logs
+            if level == 'info' and ' -> ' in text]
